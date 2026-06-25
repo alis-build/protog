@@ -9,6 +9,7 @@ import (
 	spannerAdmin "cloud.google.com/go/spanner/admin/database/apiv1"
 	spannerPb "cloud.google.com/go/spanner/admin/database/apiv1/databasepb"
 
+	"github.com/alis-build/protog/fds"
 	"github.com/spf13/cobra"
 	"go.alis.build/alog"
 )
@@ -91,14 +92,54 @@ func planCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "plan",
 		Short: "Preview protobundle changes without deploying them",
+		Args:  planOrDeployArgValidation,
+		Run: func(cmd *cobra.Command, args []string) {
+			statement := plan(cmd, args)
+			println(statement)
+		},
 	}
 	return cmd
+}
+
+func planOrDeployArgValidation(cmd *cobra.Command, args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("expecting '{projectID}/{spannerInstance}/{database}' {pathToFdsFile} (optional list of packages)")
+	}
+	return nil
+}
+
+// plan returns a spanner DDL statement that will sync the desired types to the current types.
+func plan(cmd *cobra.Command, args []string) string {
+	dbParts := strings.Split(args[0], "/")
+	bundles, err := viewProtobundles(cmd.Context(), fmt.Sprintf("projects/%s/instances/%s/databases/%s", dbParts[0], dbParts[1], dbParts[2]))
+	if err != nil {
+		alog.Fatalf(cmd.Context(), "viewing proto bundles: %v", err)
+	}
+	fdsFile := args[1]
+	fdsTypes, err := fds.ParseFdsTypes(fdsFile)
+	if err != nil {
+		alog.Fatalf(cmd.Context(), "parsing fds types: %v", err)
+	}
+	var packageIDs []string
+	if len(args) > 2 {
+		packageIDs = args[2:]
+	}
+	return buildProtobundleStatement(bundles, fdsTypes, packageIDs)
+}
+
+func buildProtobundleStatement(currentTypes map[string]struct{}, desiredTypes map[string]struct{}, packageIDs []string) string {
+	return "TODO"
 }
 
 func deployCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "deploy",
 		Short: "Deploy protobundle changes to a Spanner database",
+		Args:  planOrDeployArgValidation,
+		Run: func(cmd *cobra.Command, args []string) {
+			statement := plan(cmd, args)
+			_ = statement // TODO: Implement the actual deploy logic.
+		},
 	}
 	return cmd
 }
