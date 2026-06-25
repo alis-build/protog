@@ -55,7 +55,7 @@ func viewCmd() *cobra.Command {
 			if err != nil {
 				alog.Fatalf(cmd.Context(), "viewing proto bundles: %v", err)
 			}
-			for _, bundle := range bundles {
+			for bundle := range bundles {
 				println(bundle)
 			}
 		},
@@ -63,8 +63,8 @@ func viewCmd() *cobra.Command {
 	return cmd
 }
 
-func viewProtobundles(ctx context.Context, database string) ([]string, error) {
-	existingTypes := []string{}
+func viewProtobundles(ctx context.Context, database string) (map[string]struct{}, error) {
+	bundles := map[string]struct{}{}
 	getDatabaseDdlRes, err := SpannerAdmin.GetDatabaseDdl(ctx, &spannerPb.GetDatabaseDdlRequest{
 		Database: database,
 	})
@@ -74,17 +74,17 @@ func viewProtobundles(ctx context.Context, database string) ([]string, error) {
 	for _, ddl := range getDatabaseDdlRes.GetStatements() {
 		if strings.HasPrefix(ddl, "CREATE PROTO BUNDLE") {
 			commaSepTypes := strings.TrimPrefix(ddl, "CREATE PROTO BUNDLE (\n")
-			for _, t := range strings.Split(commaSepTypes, ",\n") {
+			for t := range strings.SplitSeq(commaSepTypes, ",\n") {
 				t = strings.Trim(t, " ")
 				t = strings.Trim(t, "`")
 				if t == "" || t == ")" {
 					continue
 				}
-				existingTypes = append(existingTypes, t)
+				bundles[t] = struct{}{}
 			}
 		}
 	}
-	return existingTypes, nil
+	return bundles, nil
 }
 
 func planCmd() *cobra.Command {
