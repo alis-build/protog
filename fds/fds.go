@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	plugin "github.com/golang/protobuf/protoc-gen-go/plugin"
 	"github.com/pseudomuto/protokit"
@@ -19,14 +20,15 @@ func Command() *cobra.Command {
 		Use:   "fds",
 		Short: "Perform parsing operations on fds files",
 	}
-	cmd.AddCommand(viewCmd())
+	cmd.AddCommand(typesCmd())
+	cmd.AddCommand(eventsCmd())
 	return cmd
 }
 
-func viewCmd() *cobra.Command {
+func typesCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "types",
-		Short: "View all messages and enums in a fds file",
+		Short: "View messages and enums",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return errors.New("expecting exactly one argument for the path to the fds file")
@@ -44,6 +46,45 @@ func viewCmd() *cobra.Command {
 		},
 	}
 	return cmd
+}
+
+func eventsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "events",
+		Short: "View top-level messages ending with 'Event'",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return errors.New("expecting exactly one argument for the path to the fds file")
+			}
+			return nil
+		},
+		Run: func(cmd *cobra.Command, args []string) {
+			events, _, err := ParseEvents(args[0])
+			if err != nil {
+				alog.Fatalf(cmd.Context(), "parsing fds types: %v", err)
+			}
+			for t := range events {
+				println(t)
+			}
+		},
+	}
+	return cmd
+}
+
+func ParseEvents(filePath string) (map[string]struct{}, []byte, error) {
+	fileDescriptors, fdsBytes, err := ParseFds(filePath)
+	if err != nil {
+		return nil, nil, err
+	}
+	events := map[string]struct{}{}
+	for _, file := range fileDescriptors {
+		for _, message := range file.GetMessages() {
+			if strings.HasSuffix(message.GetFullName(), "Event") {
+				events[message.GetFullName()] = struct{}{}
+			}
+		}
+	}
+	return events, fdsBytes, nil
 }
 
 func ParseFdsTypes(filePath string) (map[string]struct{}, []byte, error) {
