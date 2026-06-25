@@ -94,8 +94,7 @@ func planCmd() *cobra.Command {
 		Short: "Preview protobundle changes without deploying them",
 		Args:  planOrDeployArgValidation,
 		Run: func(cmd *cobra.Command, args []string) {
-			statement := plan(cmd, args)
-			println(statement)
+			_ = plan(cmd, args)
 		},
 	}
 	return cmd
@@ -108,15 +107,22 @@ func planOrDeployArgValidation(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// plan returns a spanner DDL statement that will sync the desired types to the current types.
-func plan(cmd *cobra.Command, args []string) string {
+// Plan returns a spanner DDL statement and raw fds bytes to sync the desired types to the current types.
+type Plan struct {
+	Database  string
+	Statement string
+	FdsBytes  []byte
+}
+
+func plan(cmd *cobra.Command, args []string) *Plan {
 	dbParts := strings.Split(args[0], "/")
-	bundles, err := viewProtobundles(cmd.Context(), fmt.Sprintf("projects/%s/instances/%s/databases/%s", dbParts[0], dbParts[1], dbParts[2]))
+	database := fmt.Sprintf("projects/%s/instances/%s/databases/%s", dbParts[0], dbParts[1], dbParts[2])
+	bundles, err := viewProtobundles(cmd.Context(), database)
 	if err != nil {
 		alog.Fatalf(cmd.Context(), "viewing proto bundles: %v", err)
 	}
-	fdsFile := args[1]
-	fdsTypes, err := fds.ParseFdsTypes(fdsFile)
+	fdsFilePath := args[1]
+	fdsTypes, fdsBytes, err := fds.ParseFdsTypes(fdsFilePath)
 	if err != nil {
 		alog.Fatalf(cmd.Context(), "parsing fds types: %v", err)
 	}
@@ -124,7 +130,13 @@ func plan(cmd *cobra.Command, args []string) string {
 	if len(args) > 2 {
 		packageIDs = args[2:]
 	}
-	return buildProtobundleStatement(bundles, fdsTypes, packageIDs)
+	statement := buildProtobundleStatement(bundles, fdsTypes, packageIDs)
+	println(statement)
+	return &Plan{
+		Database:  database,
+		Statement: statement,
+		FdsBytes:  fdsBytes,
+	}
 }
 
 func buildProtobundleStatement(currentTypes map[string]struct{}, desiredTypes map[string]struct{}, packageIDs []string) string {
@@ -137,8 +149,19 @@ func deployCmd() *cobra.Command {
 		Short: "Deploy protobundle changes to a Spanner database",
 		Args:  planOrDeployArgValidation,
 		Run: func(cmd *cobra.Command, args []string) {
-			statement := plan(cmd, args)
-			_ = statement // TODO: Implement the actual deploy logic.
+			plan := plan(cmd, args)
+			op, err := SpannerAdmin.UpdateDatabaseDdl(cmd.Context(), &spannerPb.UpdateDatabaseDdlRequest{
+				Database:         plan.Database,
+				Statements:       []string{plan.Statement},
+				ProtoDescriptors: plan.FdsBytes,
+			})
+			if err != nil {
+				alog.Fatalf(cmd.Context(), "updating Spanner Database DDL: %v", err)
+			}
+			err = op.Wait(cmd.Context())
+			if err != nil {
+				alog.Fatalf(cmd.Context(), "waiting for Spanner Database DDL update to complete: %v", err)
+			}
 		},
 	}
 	return cmd

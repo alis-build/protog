@@ -34,7 +34,7 @@ func viewCmd() *cobra.Command {
 			return nil
 		},
 		Run: func(cmd *cobra.Command, args []string) {
-			types, err := ParseFdsTypes(args[0])
+			types, _, err := ParseFdsTypes(args[0])
 			if err != nil {
 				alog.Fatalf(cmd.Context(), "parsing fds types: %v", err)
 			}
@@ -46,21 +46,12 @@ func viewCmd() *cobra.Command {
 	return cmd
 }
 
-func ParseFdsTypes(filePath string) (map[string]struct{}, error) {
-	fds, err := ParseFds(filePath)
+func ParseFdsTypes(filePath string) (map[string]struct{}, []byte, error) {
+	fileDescriptors, fdsBytes, err := ParseFds(filePath)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// We'll use the protokit to simplify the handling of the fds file.
-	fdsFiles := []string{}
-	for _, f := range fds.GetFile() {
-		fdsFiles = append(fdsFiles, f.GetName())
-	}
-	fileDescriptors := protokit.ParseCodeGenRequest(&plugin.CodeGeneratorRequest{
-		FileToGenerate: fdsFiles,
-		ProtoFile:      fds.GetFile(),
-	})
-
 	types := map[string]struct{}{}
 	for _, file := range fileDescriptors {
 		for _, enum := range file.GetEnums() {
@@ -75,7 +66,7 @@ func ParseFdsTypes(filePath string) (map[string]struct{}, error) {
 			}
 		}
 	}
-	return types, nil
+	return types, fdsBytes, nil
 }
 
 // Enums is a recursive method which fetches all the underlyging enums from each message.
@@ -101,14 +92,22 @@ func Messages(message *protokit.Descriptor) []*protokit.Descriptor {
 	return messages
 }
 
-func ParseFds(filePath string) (*descriptorpb.FileDescriptorSet, error) {
+// ParseFds parses a fds file and returns the FileDescriptorSet and the raw bytes.
+func ParseFds(filePath string) ([]*protokit.FileDescriptor, []byte, error) {
 	fileBytes, err := os.ReadFile(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", filePath, err)
+		return nil, nil, fmt.Errorf("reading %s: %w", filePath, err)
 	}
 	fds := descriptorpb.FileDescriptorSet{}
 	if err := proto.Unmarshal(fileBytes, &fds); err != nil {
-		return nil, fmt.Errorf("unmarshalling %s: %w", filePath, err)
+		return nil, nil, fmt.Errorf("unmarshalling %s: %w", filePath, err)
 	}
-	return &fds, nil
+	fdsFiles := []string{}
+	for _, f := range fds.GetFile() {
+		fdsFiles = append(fdsFiles, f.GetName())
+	}
+	return protokit.ParseCodeGenRequest(&plugin.CodeGeneratorRequest{
+		FileToGenerate: fdsFiles,
+		ProtoFile:      fds.GetFile(),
+	}), fileBytes, nil
 }
