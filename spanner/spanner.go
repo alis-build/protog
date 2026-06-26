@@ -122,6 +122,7 @@ func NewPlan(cmd *cobra.Command, args []string) *Plan {
 	if err != nil {
 		alog.Fatalf(cmd.Context(), "viewing proto bundles: %v", err)
 	}
+	plan.NoExistingTypes = len(bundles) == 0
 	var packageIDs []string
 	if len(args) > 2 {
 		packageIDs = args[2:]
@@ -131,18 +132,18 @@ func NewPlan(cmd *cobra.Command, args []string) *Plan {
 }
 
 type Plan struct {
-	Client   *spannerAdmin.DatabaseAdminClient
-	Database string
-	FdsBytes []byte
+	Client          *spannerAdmin.DatabaseAdminClient
+	Database        string
+	FdsBytes        []byte
+	NoExistingTypes bool
 	*diff.Diff
 }
 
 func (p *Plan) Deploy(ctx context.Context) {
 	println("Deploying proto bundles...")
-	statement := "TODO"
 	op, err := p.Client.UpdateDatabaseDdl(ctx, &spannerPb.UpdateDatabaseDdlRequest{
 		Database:         p.Database,
-		Statements:       []string{statement},
+		Statements:       []string{p.Statement()},
 		ProtoDescriptors: p.FdsBytes,
 	})
 	if err != nil {
@@ -152,6 +153,23 @@ func (p *Plan) Deploy(ctx context.Context) {
 	if err != nil {
 		alog.Fatalf(ctx, "waiting for Spanner Database DDL update to complete: %v", err)
 	}
+}
+
+func (p *Plan) Statement() string {
+	if p.NoExistingTypes {
+		return fmt.Sprintf("CREATE PROTO BUNDLE (`%s`)", strings.Join(p.Create, "`,`"))
+	}
+	statement := "ALTER PROTO BUNDLE"
+	if len(p.Create) > 0 {
+		statement += " " + fmt.Sprintf("INSERT(`%s`)", strings.Join(p.Create, "`,`"))
+	}
+	if len(p.Update) > 0 {
+		statement += " " + fmt.Sprintf("UPDATE(`%s`)", strings.Join(p.Update, "`,`"))
+	}
+	if len(p.Delete) > 0 {
+		statement += " " + fmt.Sprintf("DELETE(`%s`)", strings.Join(p.Delete, "`,`"))
+	}
+	return statement
 }
 
 func deployCmd() *cobra.Command {
