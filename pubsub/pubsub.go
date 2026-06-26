@@ -4,12 +4,11 @@ package pubsub
 import (
 	"context"
 	"errors"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 
 	"cloud.google.com/go/pubsub"
+	"github.com/alis-build/protog/diff"
 	"github.com/alis-build/protog/fds"
 	"github.com/spf13/cobra"
 	"go.alis.build/alog"
@@ -74,7 +73,8 @@ func planCmd() *cobra.Command {
 		Short: "Preview topic changes without deploying them",
 		Args:  planOrDeployArgValidation,
 		Run: func(cmd *cobra.Command, args []string) {
-			_ = plan(cmd.Context(), args, true)
+			plan := NewPlan(cmd.Context(), args)
+			plan.Print(&diff.PrintOptions{PrintIgnored: true, NoUpdates: true})
 		},
 	}
 	return cmd
@@ -87,7 +87,7 @@ func planOrDeployArgValidation(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func plan(ctx context.Context, args []string, printIgnored bool) *Plan {
+func NewPlan(ctx context.Context, args []string) *Plan {
 	plan := &Plan{}
 	var err error
 	plan.Client, err = pubsub.NewClient(ctx, args[0])
@@ -96,67 +96,26 @@ func plan(ctx context.Context, args []string, printIgnored bool) *Plan {
 	}
 	eventTopics := viewTopics(ctx, plan.Client)
 	fdsEvents, _ := fds.ParseEvents(args[1])
-	for event := range fdsEvents {
-		if _, ok := eventTopics[event]; !ok {
-			plan.CreateTopics = append(plan.CreateTopics, event)
-		}
-	}
 	var packageIDs []string
 	if len(args) > 2 {
 		packageIDs = args[2:]
 	}
-	ignores := []string{}
-	for topic := range eventTopics {
-		if !strings.HasSuffix(topic, "Event") {
-			ignores = append(ignores, topic)
-			continue
-		}
-		if _, ok := fdsEvents[topic]; !ok {
-			var foundPackage bool
-			for _, packageID := range packageIDs {
-				if strings.HasPrefix(topic, packageID) {
-					foundPackage = true
-					break
-				}
-			}
-			if !foundPackage {
-				ignores = append(ignores, topic)
-				continue
-			}
-			plan.DeleteTopics = append(plan.DeleteTopics, topic)
-		}
-	}
-	if printIgnored {
-		for _, topic := range ignores {
-			println("\033[37mIGNORE " + topic + "\033[0m")
-		}
-	}
-	for _, topic := range plan.CreateTopics {
-		println("➕ CREATE " + topic)
-	}
-	for _, topic := range plan.DeleteTopics {
-		println("🗑️ DELETE " + topic)
-	}
-	println()
-	println("TOTAL TOPICS IGNORED: " + strconv.Itoa(len(ignores)))
-	println("TOTAL TOPICS TO CREATE: " + strconv.Itoa(len(plan.CreateTopics)))
-	println("TOTAL TOPICS TO DELETE: " + strconv.Itoa(len(plan.DeleteTopics)))
+	plan.Diff = diff.New(eventTopics, fdsEvents, packageIDs)
 	return plan
 }
 
 type Plan struct {
-	Client       *pubsub.Client
-	CreateTopics []string
-	DeleteTopics []string
+	Client *pubsub.Client
+	*diff.Diff
 }
 
 func (p *Plan) Deploy(ctx context.Context) {
-	if len(p.CreateTopics) > 0 {
+	if len(p.Create) > 0 {
 		println("Creating topics...")
 	}
 	hadError := atomic.Bool{}
 	wg := sync.WaitGroup{}
-	for i, topic := range p.CreateTopics {
+	for i, topic := range p.Create {
 		wg.Go(func() {
 			_, err := p.Client.CreateTopic(ctx, topic)
 			if err != nil {
@@ -171,10 +130,10 @@ func (p *Plan) Deploy(ctx context.Context) {
 			}
 		}
 	}
-	if len(p.DeleteTopics) > 0 {
+	if len(p.Delete) > 0 {
 		println("Deleting topics...")
 	}
-	for i, topic := range p.DeleteTopics {
+	for i, topic := range p.Delete {
 		wg.Go(func() {
 			err := p.Client.Topic(topic).Delete(ctx)
 			if err != nil {
@@ -201,7 +160,8 @@ func deployCmd() *cobra.Command {
 		Short: "Deploy topic changes to a Google Project",
 		Args:  planOrDeployArgValidation,
 		Run: func(cmd *cobra.Command, args []string) {
-			plan := plan(cmd.Context(), args, false)
+			plan := NewPlan(cmd.Context(), args)
+			plan.Print(&diff.PrintOptions{PrintIgnored: false, NoUpdates: false})
 			plan.Deploy(cmd.Context())
 		},
 	}

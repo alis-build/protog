@@ -9,21 +9,11 @@ import (
 	spannerAdmin "cloud.google.com/go/spanner/admin/database/apiv1"
 	spannerPb "cloud.google.com/go/spanner/admin/database/apiv1/databasepb"
 
+	"github.com/alis-build/protog/diff"
 	"github.com/alis-build/protog/fds"
 	"github.com/spf13/cobra"
 	"go.alis.build/alog"
 )
-
-var SpannerAdmin *spannerAdmin.DatabaseAdminClient
-
-func init() {
-	ctx := context.Background()
-	var err error
-	SpannerAdmin, err = spannerAdmin.NewDatabaseAdminClient(ctx)
-	if err != nil {
-		alog.Fatalf(ctx, "spanner.NewDatabaseAdminClient: %s", err.Error())
-	}
-}
 
 func Command() *cobra.Command {
 	cmd := &cobra.Command{
@@ -52,7 +42,9 @@ func viewCmd() *cobra.Command {
 		},
 		Run: func(cmd *cobra.Command, args []string) {
 			parts := strings.Split(args[0], "/")
-			bundles, err := viewProtobundles(cmd.Context(), fmt.Sprintf("projects/%s/instances/%s/databases/%s", parts[0], parts[1], parts[2]))
+			spannerAdmin := SpannerAdmin(cmd.Context())
+			database := fmt.Sprintf("projects/%s/instances/%s/databases/%s", parts[0], parts[1], parts[2])
+			bundles, err := viewProtobundles(cmd.Context(), spannerAdmin, database)
 			if err != nil {
 				alog.Fatalf(cmd.Context(), "viewing proto bundles: %v", err)
 			}
@@ -64,9 +56,18 @@ func viewCmd() *cobra.Command {
 	return cmd
 }
 
-func viewProtobundles(ctx context.Context, database string) (map[string]struct{}, error) {
+func SpannerAdmin(ctx context.Context) *spannerAdmin.DatabaseAdminClient {
+	spannerAdmin, err := spannerAdmin.NewDatabaseAdminClient(ctx)
+	if err != nil {
+		alog.Fatalf(ctx, "spanner.NewDatabaseAdminClient: %s", err.Error())
+	}
+	return spannerAdmin
+}
+
+func viewProtobundles(ctx context.Context, client *spannerAdmin.DatabaseAdminClient, database string) (map[string]struct{}, error) {
+	println("Fetching current proto bundles...")
 	bundles := map[string]struct{}{}
-	getDatabaseDdlRes, err := SpannerAdmin.GetDatabaseDdl(ctx, &spannerPb.GetDatabaseDdlRequest{
+	getDatabaseDdlRes, err := client.GetDatabaseDdl(ctx, &spannerPb.GetDatabaseDdlRequest{
 		Database: database,
 	})
 	if err != nil {
@@ -94,7 +95,8 @@ func planCmd() *cobra.Command {
 		Short: "Preview protobundle changes without deploying them",
 		Args:  planOrDeployArgValidation,
 		Run: func(cmd *cobra.Command, args []string) {
-			_ = plan(cmd, args)
+			plan := NewPlan(cmd, args)
+			plan.Print(&diff.PrintOptions{PrintIgnored: true})
 		},
 	}
 	return cmd
@@ -107,37 +109,49 @@ func planOrDeployArgValidation(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// Plan returns a spanner DDL statement and raw fds bytes to sync the desired types to the current types.
-type Plan struct {
-	Database  string
-	Statement string
-	FdsBytes  []byte
-}
-
-func plan(cmd *cobra.Command, args []string) *Plan {
+func NewPlan(cmd *cobra.Command, args []string) *Plan {
 	dbParts := strings.Split(args[0], "/")
-	database := fmt.Sprintf("projects/%s/instances/%s/databases/%s", dbParts[0], dbParts[1], dbParts[2])
-	bundles, err := viewProtobundles(cmd.Context(), database)
+	fdsFilePath := args[1]
+	fdsTypes, fdsBytes := fds.ParseFdsTypes(fdsFilePath)
+	plan := &Plan{
+		Client:   SpannerAdmin(cmd.Context()),
+		Database: fmt.Sprintf("projects/%s/instances/%s/databases/%s", dbParts[0], dbParts[1], dbParts[2]),
+		FdsBytes: fdsBytes,
+	}
+	bundles, err := viewProtobundles(cmd.Context(), plan.Client, plan.Database)
 	if err != nil {
 		alog.Fatalf(cmd.Context(), "viewing proto bundles: %v", err)
 	}
-	fdsFilePath := args[1]
-	fdsTypes, fdsBytes := fds.ParseFdsTypes(fdsFilePath)
 	var packageIDs []string
 	if len(args) > 2 {
 		packageIDs = args[2:]
 	}
-	statement := buildProtobundleStatement(bundles, fdsTypes, packageIDs)
-	println(statement)
-	return &Plan{
-		Database:  database,
-		Statement: statement,
-		FdsBytes:  fdsBytes,
-	}
+	plan.Diff = diff.New(bundles, fdsTypes, packageIDs)
+	return plan
 }
 
-func buildProtobundleStatement(currentTypes map[string]struct{}, desiredTypes map[string]struct{}, packageIDs []string) string {
-	return "TODO"
+type Plan struct {
+	Client   *spannerAdmin.DatabaseAdminClient
+	Database string
+	FdsBytes []byte
+	*diff.Diff
+}
+
+func (p *Plan) Deploy(ctx context.Context) {
+	println("Deploying proto bundles...")
+	statement := "TODO"
+	op, err := p.Client.UpdateDatabaseDdl(ctx, &spannerPb.UpdateDatabaseDdlRequest{
+		Database:         p.Database,
+		Statements:       []string{statement},
+		ProtoDescriptors: p.FdsBytes,
+	})
+	if err != nil {
+		alog.Fatalf(ctx, "updating Spanner Database DDL: %v", err)
+	}
+	err = op.Wait(ctx)
+	if err != nil {
+		alog.Fatalf(ctx, "waiting for Spanner Database DDL update to complete: %v", err)
+	}
 }
 
 func deployCmd() *cobra.Command {
@@ -146,19 +160,9 @@ func deployCmd() *cobra.Command {
 		Short: "Deploy protobundle changes to a Spanner database",
 		Args:  planOrDeployArgValidation,
 		Run: func(cmd *cobra.Command, args []string) {
-			plan := plan(cmd, args)
-			op, err := SpannerAdmin.UpdateDatabaseDdl(cmd.Context(), &spannerPb.UpdateDatabaseDdlRequest{
-				Database:         plan.Database,
-				Statements:       []string{plan.Statement},
-				ProtoDescriptors: plan.FdsBytes,
-			})
-			if err != nil {
-				alog.Fatalf(cmd.Context(), "updating Spanner Database DDL: %v", err)
-			}
-			err = op.Wait(cmd.Context())
-			if err != nil {
-				alog.Fatalf(cmd.Context(), "waiting for Spanner Database DDL update to complete: %v", err)
-			}
+			plan := NewPlan(cmd, args)
+			plan.Print(&diff.PrintOptions{})
+			plan.Deploy(cmd.Context())
 		},
 	}
 	return cmd
