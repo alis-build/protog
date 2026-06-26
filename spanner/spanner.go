@@ -122,10 +122,7 @@ func plan(cmd *cobra.Command, args []string) *Plan {
 		alog.Fatalf(cmd.Context(), "viewing proto bundles: %v", err)
 	}
 	fdsFilePath := args[1]
-	fdsTypes, fdsBytes, err := fds.ParseFdsTypes(fdsFilePath)
-	if err != nil {
-		alog.Fatalf(cmd.Context(), "parsing fds types: %v", err)
-	}
+	fdsTypes, fdsBytes := fds.ParseFdsTypes(fdsFilePath)
 	var packageIDs []string
 	if len(args) > 2 {
 		packageIDs = args[2:]

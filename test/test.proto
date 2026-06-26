@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package test;
+
+message TestEvents {
+  string message = 1;
+}
+
+enum TestEnum {
+  TEST_ENUM_UNSPECIFIED = 0;
+  TEST_ENUM_VALUE_1 = 1;
+  TEST_ENUM_VALUE_2 = 2;
+}
+
+message TestMessage {
+  string id = 1;
+  enum NestedEnum {
+    NESTED_ENUM_UNSPECIFIED = 0;
+    NESTED_ENUM_VALUE_1 = 1;
+    NESTED_ENUM_VALUE_2 = 2;
+  }
+  message NestedMessage {
+    string id = 1;
+    enum NestedNestedEnum {
+      NESTED_NESTED_ENUM_UNSPECIFIED = 0;
+      NESTED_NESTED_ENUM_VALUE_1 = 1;
+      NESTED_NESTED_ENUM_VALUE_2 = 2;
+    }
+  }
+}

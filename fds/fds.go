@@ -2,8 +2,8 @@
 package fds
 
 import (
+	"context"
 	"errors"
-	"fmt"
 	"os"
 	"strings"
 
@@ -36,10 +36,7 @@ func typesCmd() *cobra.Command {
 			return nil
 		},
 		Run: func(cmd *cobra.Command, args []string) {
-			types, _, err := ParseFdsTypes(args[0])
-			if err != nil {
-				alog.Fatalf(cmd.Context(), "parsing fds types: %v", err)
-			}
+			types, _ := ParseFdsTypes(args[0])
 			for t := range types {
 				println(t)
 			}
@@ -59,10 +56,7 @@ func eventsCmd() *cobra.Command {
 			return nil
 		},
 		Run: func(cmd *cobra.Command, args []string) {
-			events, _, err := ParseEvents(args[0])
-			if err != nil {
-				alog.Fatalf(cmd.Context(), "parsing fds types: %v", err)
-			}
+			events, _ := ParseEvents(args[0])
 			for t := range events {
 				println(t)
 			}
@@ -71,11 +65,8 @@ func eventsCmd() *cobra.Command {
 	return cmd
 }
 
-func ParseEvents(filePath string) (map[string]struct{}, []byte, error) {
-	fileDescriptors, fdsBytes, err := ParseFds(filePath)
-	if err != nil {
-		return nil, nil, err
-	}
+func ParseEvents(filePath string) (map[string]struct{}, []byte) {
+	fileDescriptors, fdsBytes := ParseFds(filePath)
 	events := map[string]struct{}{}
 	for _, file := range fileDescriptors {
 		for _, message := range file.GetMessages() {
@@ -84,15 +75,11 @@ func ParseEvents(filePath string) (map[string]struct{}, []byte, error) {
 			}
 		}
 	}
-	return events, fdsBytes, nil
+	return events, fdsBytes
 }
 
-func ParseFdsTypes(filePath string) (map[string]struct{}, []byte, error) {
-	fileDescriptors, fdsBytes, err := ParseFds(filePath)
-	if err != nil {
-		return nil, nil, err
-	}
-	// We'll use the protokit to simplify the handling of the fds file.
+func ParseFdsTypes(filePath string) (map[string]struct{}, []byte) {
+	fileDescriptors, fdsBytes := ParseFds(filePath)
 	types := map[string]struct{}{}
 	for _, file := range fileDescriptors {
 		for _, enum := range file.GetEnums() {
@@ -107,7 +94,7 @@ func ParseFdsTypes(filePath string) (map[string]struct{}, []byte, error) {
 			}
 		}
 	}
-	return types, fdsBytes, nil
+	return types, fdsBytes
 }
 
 // Enums is a recursive method which fetches all the underlyging enums from each message.
@@ -134,14 +121,15 @@ func Messages(message *protokit.Descriptor) []*protokit.Descriptor {
 }
 
 // ParseFds parses a fds file and returns the FileDescriptorSet and the raw bytes.
-func ParseFds(filePath string) ([]*protokit.FileDescriptor, []byte, error) {
+func ParseFds(filePath string) ([]*protokit.FileDescriptor, []byte) {
+	println("Parsing fds file " + filePath)
 	fileBytes, err := os.ReadFile(filePath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("reading %s: %w", filePath, err)
+		alog.Alertf(context.Background(), "reading %s: %v", filePath, err)
 	}
 	fds := descriptorpb.FileDescriptorSet{}
 	if err := proto.Unmarshal(fileBytes, &fds); err != nil {
-		return nil, nil, fmt.Errorf("unmarshalling %s: %w", filePath, err)
+		alog.Alertf(context.Background(), "unmarshalling %s: %v", filePath, err)
 	}
 	fdsFiles := []string{}
 	for _, f := range fds.GetFile() {
@@ -150,5 +138,5 @@ func ParseFds(filePath string) ([]*protokit.FileDescriptor, []byte, error) {
 	return protokit.ParseCodeGenRequest(&plugin.CodeGeneratorRequest{
 		FileToGenerate: fdsFiles,
 		ProtoFile:      fds.GetFile(),
-	}), fileBytes, nil
+	}), fileBytes
 }
