@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package test;
 
-message TestEvents {
+message TestEvent {
   string message = 1;
 }
 
