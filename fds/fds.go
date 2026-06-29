@@ -125,11 +125,11 @@ func ParseFds(filePath string) ([]*protokit.FileDescriptor, []byte) {
 	println("Parsing fds file " + filePath)
 	fileBytes, err := os.ReadFile(filePath)
 	if err != nil {
-		alog.Alertf(context.Background(), "reading %s: %v", filePath, err)
+		alog.Fatalf(context.Background(), "reading %s: %v", filePath, err)
 	}
 	fds := descriptorpb.FileDescriptorSet{}
 	if err := proto.Unmarshal(fileBytes, &fds); err != nil {
-		alog.Alertf(context.Background(), "unmarshalling %s: %v", filePath, err)
+		alog.Fatalf(context.Background(), "unmarshalling %s: %v", filePath, err)
 	}
 	fdsFiles := []string{}
 	for _, f := range fds.GetFile() {
