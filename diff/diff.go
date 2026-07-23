@@ -26,9 +26,12 @@ func New(current map[string]struct{}, desired map[string]struct{}, packageIDs []
 		if _, ok := desired[topic]; !ok {
 			var foundPackage bool
 			for _, packageID := range packageIDs {
-				if strings.HasPrefix(topic, packageID) {
-					foundPackage = true
-					break
+				if suffix, ok := strings.CutPrefix(topic, packageID+"."); ok {
+					// only add if first char is uppercase, thus ignoring subpackages
+					if len(suffix) > 0 && suffix[0] >= 'A' && suffix[0] <= 'Z' {
+						foundPackage = true
+						break
+					}
 				}
 			}
 			if !foundPackage {
