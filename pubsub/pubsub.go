@@ -4,6 +4,7 @@ package pubsub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -13,6 +14,8 @@ import (
 	"github.com/spf13/cobra"
 	"go.alis.build/alog"
 	"google.golang.org/api/iterator"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func Command() *cobra.Command {
@@ -37,11 +40,11 @@ func viewCmd() *cobra.Command {
 			return nil
 		},
 		Run: func(cmd *cobra.Command, args []string) {
-			client, err := pubsub.NewClient(cmd.Context(), args[0])
+			client, eventTopics, err := clientAndTopics(cmd.Context(), args[0])
 			if err != nil {
-				alog.Fatalf(cmd.Context(), "instantiate pubsub client for %s: %v", args[0], err)
+				alog.Fatalf(cmd.Context(), "view pubsub topics for %s: %v", args[0], err)
 			}
-			eventTopics := viewTopics(cmd.Context(), client)
+			defer client.Close()
 			for topic := range eventTopics {
 				println(topic)
 			}
@@ -50,7 +53,7 @@ func viewCmd() *cobra.Command {
 	return cmd
 }
 
-func viewTopics(ctx context.Context, client *pubsub.Client) map[string]struct{} {
+func viewTopics(ctx context.Context, client *pubsub.Client) (map[string]struct{}, error) {
 	println("Fetching current topics...")
 	eventTopics := map[string]struct{}{}
 	it := client.Topics(ctx)
@@ -60,11 +63,45 @@ func viewTopics(ctx context.Context, client *pubsub.Client) map[string]struct{} 
 			break
 		}
 		if err != nil {
-			alog.Fatalf(ctx, "listing pubsub topics: %v", err)
+			return nil, fmt.Errorf("listing pubsub topics: %w", err)
 		}
 		eventTopics[topic.ID()] = struct{}{}
 	}
-	return eventTopics
+	return eventTopics, nil
+}
+
+type topicsView struct {
+	client *pubsub.Client
+	topics map[string]struct{}
+}
+
+func clientAndTopics(ctx context.Context, projectID string) (*pubsub.Client, map[string]struct{}, error) {
+	view, err := retryUnauthenticated(func() (*topicsView, error) {
+		client, err := pubsub.NewClient(ctx, projectID)
+		if err != nil {
+			return nil, fmt.Errorf("instantiate pubsub client: %w", err)
+		}
+		topics, err := viewTopics(ctx, client)
+		if err != nil {
+			_ = client.Close()
+			return nil, err
+		}
+		return &topicsView{client: client, topics: topics}, nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return view.client, view.topics, nil
+}
+
+// retryUnauthenticated retries once so a rejected cached credential is
+// discarded and the caller can obtain a fresh one.
+func retryUnauthenticated[T any](fn func() (T, error)) (T, error) {
+	result, err := fn()
+	if status.Code(err) != codes.Unauthenticated {
+		return result, err
+	}
+	return fn()
 }
 
 func planCmd() *cobra.Command {
@@ -74,6 +111,7 @@ func planCmd() *cobra.Command {
 		Args:  planOrDeployArgValidation,
 		Run: func(cmd *cobra.Command, args []string) {
 			plan := NewPlan(cmd.Context(), args)
+			defer plan.Client.Close()
 			plan.Print(&diff.PrintOptions{PrintIgnored: true, NoUpdates: true})
 		},
 	}
@@ -88,13 +126,11 @@ func planOrDeployArgValidation(cmd *cobra.Command, args []string) error {
 }
 
 func NewPlan(ctx context.Context, args []string) *Plan {
-	plan := &Plan{}
-	var err error
-	plan.Client, err = pubsub.NewClient(ctx, args[0])
+	client, eventTopics, err := clientAndTopics(ctx, args[0])
 	if err != nil {
-		alog.Fatalf(ctx, "instantiate pubsub client for %s: %v", args[0], err)
+		alog.Fatalf(ctx, "view pubsub topics for %s: %v", args[0], err)
 	}
-	eventTopics := viewTopics(ctx, plan.Client)
+	plan := &Plan{Client: client}
 	fdsEvents, _ := fds.ParseEvents(args[1])
 	var packageIDs []string
 	if len(args) > 2 {
@@ -161,6 +197,7 @@ func deployCmd() *cobra.Command {
 		Args:  planOrDeployArgValidation,
 		Run: func(cmd *cobra.Command, args []string) {
 			plan := NewPlan(cmd.Context(), args)
+			defer plan.Client.Close()
 			plan.Print(&diff.PrintOptions{PrintIgnored: false, NoUpdates: false})
 			plan.Deploy(cmd.Context())
 		},
