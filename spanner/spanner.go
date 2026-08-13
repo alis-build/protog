@@ -13,6 +13,8 @@ import (
 	"github.com/alis-build/protog/fds"
 	"github.com/spf13/cobra"
 	"go.alis.build/alog"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func Command() *cobra.Command {
@@ -42,12 +44,12 @@ func viewCmd() *cobra.Command {
 		},
 		Run: func(cmd *cobra.Command, args []string) {
 			parts := strings.Split(args[0], "/")
-			spannerAdmin := SpannerAdmin(cmd.Context())
 			database := fmt.Sprintf("projects/%s/instances/%s/databases/%s", parts[0], parts[1], parts[2])
-			bundles, err := viewProtobundles(cmd.Context(), spannerAdmin, database)
+			client, bundles, err := clientAndProtobundles(cmd.Context(), database)
 			if err != nil {
 				alog.Fatalf(cmd.Context(), "viewing proto bundles: %v", err)
 			}
+			defer client.Close()
 			for bundle := range bundles {
 				println(bundle)
 			}
@@ -57,11 +59,57 @@ func viewCmd() *cobra.Command {
 }
 
 func SpannerAdmin(ctx context.Context) *spannerAdmin.DatabaseAdminClient {
-	spannerAdmin, err := spannerAdmin.NewDatabaseAdminClient(ctx)
+	client, err := spannerAdmin.NewDatabaseAdminClient(ctx)
 	if err != nil {
 		alog.Fatalf(ctx, "spanner.NewDatabaseAdminClient: %s", err.Error())
 	}
-	return spannerAdmin
+	return client
+}
+
+func clientAndProtobundles(ctx context.Context, database string) (*spannerAdmin.DatabaseAdminClient, map[string]struct{}, error) {
+	client := SpannerAdmin(ctx)
+	bundles, err := retryUnauthenticated(
+		func() (map[string]struct{}, error) {
+			return viewProtobundles(ctx, client, database)
+		},
+		func() error {
+			return refreshSpannerAdmin(ctx, &client)
+		},
+	)
+	if err != nil {
+		if client != nil {
+			_ = client.Close()
+		}
+		return nil, nil, err
+	}
+	return client, bundles, nil
+}
+
+func refreshSpannerAdmin(ctx context.Context, client **spannerAdmin.DatabaseAdminClient) error {
+	if *client != nil {
+		_ = (*client).Close()
+		*client = nil
+	}
+	refreshed, err := spannerAdmin.NewDatabaseAdminClient(ctx)
+	if err != nil {
+		return fmt.Errorf("spanner.NewDatabaseAdminClient: %w", err)
+	}
+	*client = refreshed
+	return nil
+}
+
+// retryUnauthenticated retries once after replacing the client that supplied
+// the rejected cached credential.
+func retryUnauthenticated[T any](fn func() (T, error), refresh func() error) (T, error) {
+	result, err := fn()
+	if status.Code(err) != codes.Unauthenticated {
+		return result, err
+	}
+	if err := refresh(); err != nil {
+		var zero T
+		return zero, fmt.Errorf("refreshing credentials: %w", err)
+	}
+	return fn()
 }
 
 func viewProtobundles(ctx context.Context, client *spannerAdmin.DatabaseAdminClient, database string) (map[string]struct{}, error) {
@@ -96,6 +144,7 @@ func planCmd() *cobra.Command {
 		Args:  planOrDeployArgValidation,
 		Run: func(cmd *cobra.Command, args []string) {
 			plan := NewPlan(cmd, args)
+			defer plan.Close()
 			plan.Print(&diff.PrintOptions{PrintIgnored: true})
 		},
 	}
@@ -113,14 +162,15 @@ func NewPlan(cmd *cobra.Command, args []string) *Plan {
 	dbParts := strings.Split(args[0], "/")
 	fdsFilePath := args[1]
 	fdsTypes, fdsBytes := fds.ParseFdsTypes(fdsFilePath)
-	plan := &Plan{
-		Client:   SpannerAdmin(cmd.Context()),
-		Database: fmt.Sprintf("projects/%s/instances/%s/databases/%s", dbParts[0], dbParts[1], dbParts[2]),
-		FdsBytes: fdsBytes,
-	}
-	bundles, err := viewProtobundles(cmd.Context(), plan.Client, plan.Database)
+	database := fmt.Sprintf("projects/%s/instances/%s/databases/%s", dbParts[0], dbParts[1], dbParts[2])
+	client, bundles, err := clientAndProtobundles(cmd.Context(), database)
 	if err != nil {
 		alog.Fatalf(cmd.Context(), "viewing proto bundles: %v", err)
+	}
+	plan := &Plan{
+		Client:   client,
+		Database: database,
+		FdsBytes: fdsBytes,
 	}
 	plan.NoExistingTypes = len(bundles) == 0
 	var packageIDs []string
@@ -139,20 +189,53 @@ type Plan struct {
 	*diff.Diff
 }
 
+func (p *Plan) Close() {
+	if p.Client != nil {
+		_ = p.Client.Close()
+	}
+}
+
 func (p *Plan) Deploy(ctx context.Context) {
+	if err := p.deploy(ctx); err != nil {
+		alog.Fatalf(ctx, "%v", err)
+	}
+}
+
+func (p *Plan) deploy(ctx context.Context) error {
 	println("Deploying proto bundles...")
-	op, err := p.Client.UpdateDatabaseDdl(ctx, &spannerPb.UpdateDatabaseDdlRequest{
+	request := &spannerPb.UpdateDatabaseDdlRequest{
 		Database:         p.Database,
 		Statements:       []string{p.Statement()},
 		ProtoDescriptors: p.FdsBytes,
-	})
-	if err != nil {
-		alog.Fatalf(ctx, "updating Spanner Database DDL: %v", err)
 	}
-	err = op.Wait(ctx)
+	op, err := retryUnauthenticated(
+		func() (*spannerAdmin.UpdateDatabaseDdlOperation, error) {
+			return p.Client.UpdateDatabaseDdl(ctx, request)
+		},
+		func() error {
+			return refreshSpannerAdmin(ctx, &p.Client)
+		},
+	)
 	if err != nil {
-		alog.Fatalf(ctx, "waiting for Spanner Database DDL update to complete: %v", err)
+		return fmt.Errorf("updating Spanner Database DDL: %w", err)
 	}
+	operationName := op.Name()
+	_, err = retryUnauthenticated(
+		func() (struct{}, error) {
+			return struct{}{}, op.Wait(ctx)
+		},
+		func() error {
+			if err := refreshSpannerAdmin(ctx, &p.Client); err != nil {
+				return err
+			}
+			op = p.Client.UpdateDatabaseDdlOperation(operationName)
+			return nil
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("waiting for Spanner Database DDL update to complete: %w", err)
+	}
+	return nil
 }
 
 func (p *Plan) Statement() string {
@@ -179,6 +262,7 @@ func deployCmd() *cobra.Command {
 		Args:  planOrDeployArgValidation,
 		Run: func(cmd *cobra.Command, args []string) {
 			plan := NewPlan(cmd, args)
+			defer plan.Close()
 			plan.Print(&diff.PrintOptions{})
 			plan.Deploy(cmd.Context())
 		},
