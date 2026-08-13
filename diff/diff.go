@@ -15,33 +15,40 @@ type Diff struct {
 
 func New(current map[string]struct{}, desired map[string]struct{}, packageIDs []string) *Diff {
 	diff := &Diff{}
-	for event := range desired {
-		if _, ok := current[event]; !ok {
-			diff.Create = append(diff.Create, event)
+	for item := range desired {
+		if _, ok := current[item]; !ok {
+			// Keep creating missing imported types because a target package can
+			// depend on them. Existing imported types do not need to be updated.
+			diff.Create = append(diff.Create, item)
+		} else if len(packageIDs) == 0 || inPackage(item, packageIDs) {
+			diff.Update = append(diff.Update, item)
 		} else {
-			diff.Update = append(diff.Update, event)
+			diff.Ignore = append(diff.Ignore, item)
 		}
 	}
-	for topic := range current {
-		if _, ok := desired[topic]; !ok {
-			var foundPackage bool
-			for _, packageID := range packageIDs {
-				if suffix, ok := strings.CutPrefix(topic, packageID+"."); ok {
-					// only add if first char is uppercase, thus ignoring subpackages
-					if len(suffix) > 0 && suffix[0] >= 'A' && suffix[0] <= 'Z' {
-						foundPackage = true
-						break
-					}
-				}
-			}
-			if !foundPackage {
-				diff.Ignore = append(diff.Ignore, topic)
+	for item := range current {
+		if _, ok := desired[item]; !ok {
+			if !inPackage(item, packageIDs) {
+				diff.Ignore = append(diff.Ignore, item)
 				continue
 			}
-			diff.Delete = append(diff.Delete, topic)
+			diff.Delete = append(diff.Delete, item)
 		}
 	}
 	return diff
+}
+
+func inPackage(item string, packageIDs []string) bool {
+	for _, packageID := range packageIDs {
+		if suffix, ok := strings.CutPrefix(item, packageID+"."); ok {
+			// An uppercase first identifier denotes a type in the package. A
+			// lowercase identifier belongs to a nested proto package instead.
+			if len(suffix) > 0 && suffix[0] >= 'A' && suffix[0] <= 'Z' {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type PrintOptions struct {
