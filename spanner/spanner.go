@@ -4,15 +4,18 @@ package spanner
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
+	"time"
 
 	spannerAdmin "cloud.google.com/go/spanner/admin/database/apiv1"
 	spannerPb "cloud.google.com/go/spanner/admin/database/apiv1/databasepb"
 
 	"github.com/alis-build/protog/diff"
 	"github.com/alis-build/protog/fds"
+	"github.com/alis-build/protog/output"
 	"github.com/spf13/cobra"
-	"go.alis.build/alog"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -28,6 +31,13 @@ func Command() *cobra.Command {
 	return cmd
 }
 
+type viewResult struct {
+	Database string   `json:"database"`
+	Types    []string `json:"types"`
+}
+
+func (r viewResult) Lines() []string { return r.Types }
+
 func viewCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "view",
@@ -42,32 +52,34 @@ func viewCmd() *cobra.Command {
 			}
 			return nil
 		},
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			parts := strings.Split(args[0], "/")
 			database := fmt.Sprintf("projects/%s/instances/%s/databases/%s", parts[0], parts[1], parts[2])
 			client, bundles, err := clientAndProtobundles(cmd.Context(), database)
 			if err != nil {
-				alog.Fatalf(cmd.Context(), "viewing proto bundles: %v", err)
+				return fmt.Errorf("viewing proto bundles: %w", err)
 			}
 			defer client.Close()
-			for bundle := range bundles {
-				println(bundle)
-			}
+			output.Result(viewResult{Database: database, Types: slices.Sorted(maps.Keys(bundles))})
+			return nil
 		},
 	}
 	return cmd
 }
 
-func SpannerAdmin(ctx context.Context) *spannerAdmin.DatabaseAdminClient {
+func SpannerAdmin(ctx context.Context) (*spannerAdmin.DatabaseAdminClient, error) {
 	client, err := spannerAdmin.NewDatabaseAdminClient(ctx)
 	if err != nil {
-		alog.Fatalf(ctx, "spanner.NewDatabaseAdminClient: %s", err.Error())
+		return nil, fmt.Errorf("spanner.NewDatabaseAdminClient: %w", err)
 	}
-	return client
+	return client, nil
 }
 
 func clientAndProtobundles(ctx context.Context, database string) (*spannerAdmin.DatabaseAdminClient, map[string]struct{}, error) {
-	client := SpannerAdmin(ctx)
+	client, err := SpannerAdmin(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
 	bundles, err := retryUnauthenticated(
 		func() (map[string]struct{}, error) {
 			return viewProtobundles(ctx, client, database)
@@ -86,6 +98,7 @@ func clientAndProtobundles(ctx context.Context, database string) (*spannerAdmin.
 }
 
 func refreshSpannerAdmin(ctx context.Context, client **spannerAdmin.DatabaseAdminClient) error {
+	output.AuthRetry("cached credential rejected", 2)
 	if *client != nil {
 		_ = (*client).Close()
 		*client = nil
@@ -113,7 +126,8 @@ func retryUnauthenticated[T any](fn func() (T, error), refresh func() error) (T,
 }
 
 func viewProtobundles(ctx context.Context, client *spannerAdmin.DatabaseAdminClient, database string) (map[string]struct{}, error) {
-	println("Fetching current proto bundles...")
+	target := output.SpannerDatabase(database)
+	output.RefreshStart(target)
 	bundles := map[string]struct{}{}
 	getDatabaseDdlRes, err := client.GetDatabaseDdl(ctx, &spannerPb.GetDatabaseDdlRequest{
 		Database: database,
@@ -134,7 +148,33 @@ func viewProtobundles(ctx context.Context, client *spannerAdmin.DatabaseAdminCli
 			}
 		}
 	}
+	output.RefreshComplete(target, len(bundles))
 	return bundles, nil
+}
+
+type planResult struct {
+	Operation string          `json:"operation"`
+	Target    output.Resource `json:"target"`
+	Create    []string        `json:"create"`
+	Update    []string        `json:"update"`
+	Delete    []string        `json:"delete"`
+	Ignore    []string        `json:"ignore"`
+	Changes   output.Summary  `json:"changes"`
+	Statement string          `json:"statement,omitempty"`
+}
+
+type deployResult struct {
+	planResult
+	Lro     *LroInfo `json:"lro,omitempty"`
+	Success bool     `json:"success"`
+}
+
+// LroInfo reports the Spanner UpdateDatabaseDdl long-running operation.
+type LroInfo struct {
+	Name             string   `json:"name"`
+	Done             bool     `json:"done"`
+	Throttled        bool     `json:"throttled"`
+	CommitTimestamps []string `json:"commit_timestamps,omitempty"`
 }
 
 func planCmd() *cobra.Command {
@@ -142,10 +182,15 @@ func planCmd() *cobra.Command {
 		Use:   "plan",
 		Short: "Preview protobundle changes without deploying them",
 		Args:  planOrDeployArgValidation,
-		Run: func(cmd *cobra.Command, args []string) {
-			plan := NewPlan(cmd, args)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			plan, err := NewPlan(cmd, args)
+			if err != nil {
+				return err
+			}
 			defer plan.Close()
-			plan.Print(&diff.PrintOptions{PrintIgnored: true})
+			plan.Emit(output.Get(), output.SpannerType(plan.Database), "plan", &diff.PrintOptions{PrintIgnored: true})
+			output.Result(plan.result("plan"))
+			return nil
 		},
 	}
 	return cmd
@@ -155,17 +200,23 @@ func planOrDeployArgValidation(cmd *cobra.Command, args []string) error {
 	if len(args) < 2 {
 		return fmt.Errorf("expecting '{projectID}/{spannerInstance}/{database}' {pathToFdsFile} (optional list of packages)")
 	}
+	if len(strings.Split(args[0], "/")) != 3 {
+		return fmt.Errorf("expecting '{projectID}/{spannerInstance}/{database}' as the first argument")
+	}
 	return nil
 }
 
-func NewPlan(cmd *cobra.Command, args []string) *Plan {
+func NewPlan(cmd *cobra.Command, args []string) (*Plan, error) {
 	dbParts := strings.Split(args[0], "/")
 	fdsFilePath := args[1]
-	fdsTypes, fdsBytes := fds.ParseFdsTypes(fdsFilePath)
+	fdsTypes, fdsBytes, err := fds.ParseFdsTypes(fdsFilePath)
+	if err != nil {
+		return nil, err
+	}
 	database := fmt.Sprintf("projects/%s/instances/%s/databases/%s", dbParts[0], dbParts[1], dbParts[2])
 	client, bundles, err := clientAndProtobundles(cmd.Context(), database)
 	if err != nil {
-		alog.Fatalf(cmd.Context(), "viewing proto bundles: %v", err)
+		return nil, fmt.Errorf("viewing proto bundles: %w", err)
 	}
 	plan := &Plan{
 		Client:   client,
@@ -178,7 +229,7 @@ func NewPlan(cmd *cobra.Command, args []string) *Plan {
 		packageIDs = args[2:]
 	}
 	plan.Diff = diff.New(bundles, fdsTypes, packageIDs)
-	return plan
+	return plan, nil
 }
 
 type Plan struct {
@@ -195,17 +246,37 @@ func (p *Plan) Close() {
 	}
 }
 
-func (p *Plan) Deploy(ctx context.Context) {
-	if err := p.deploy(ctx); err != nil {
-		alog.Fatalf(ctx, "%v", err)
+func (p *Plan) result(operation string) planResult {
+	return planResult{
+		Operation: operation,
+		Target:    output.SpannerDatabase(p.Database),
+		Create:    p.Create,
+		Update:    p.Update,
+		Delete:    p.Delete,
+		Ignore:    p.Ignore,
+		Changes:   p.Diff.Summary(""),
+		Statement: p.Statement(),
 	}
 }
 
-func (p *Plan) deploy(ctx context.Context) error {
-	println("Deploying proto bundles...")
+func (p *Plan) action() output.Action {
+	if p.NoExistingTypes {
+		return output.ActionCreate
+	}
+	return output.ActionUpdate
+}
+
+// Deploy submits the proto bundle DDL and waits for the long-running
+// operation, emitting progress from its metadata. The returned LroInfo is nil
+// only when the DDL submission itself failed.
+func (p *Plan) Deploy(ctx context.Context) (*LroInfo, error) {
+	target := output.SpannerDatabase(p.Database)
+	statement := p.Statement()
+	output.ApplyStart(p.action(), target, statement)
+	start := time.Now()
 	request := &spannerPb.UpdateDatabaseDdlRequest{
 		Database:         p.Database,
-		Statements:       []string{p.Statement()},
+		Statements:       []string{statement},
 		ProtoDescriptors: p.FdsBytes,
 	}
 	op, err := retryUnauthenticated(
@@ -217,12 +288,14 @@ func (p *Plan) deploy(ctx context.Context) error {
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("updating Spanner Database DDL: %w", err)
+		return nil, fmt.Errorf("updating Spanner Database DDL: %w", err)
 	}
 	operationName := op.Name()
+	info := &LroInfo{Name: operationName}
+	lastPercent := int32(-1)
 	_, err = retryUnauthenticated(
 		func() (struct{}, error) {
-			return struct{}{}, op.Wait(ctx)
+			return struct{}{}, p.waitWithProgress(ctx, op, target, start, info, &lastPercent)
 		},
 		func() error {
 			if err := refreshSpannerAdmin(ctx, &p.Client); err != nil {
@@ -233,9 +306,51 @@ func (p *Plan) deploy(ctx context.Context) error {
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("waiting for Spanner Database DDL update to complete: %w", err)
+		output.ApplyErrored(p.action(), target, err, time.Since(start))
+		return info, fmt.Errorf("waiting for Spanner Database DDL update to complete: %w", err)
 	}
-	return nil
+	info.Done = true
+	output.ApplyComplete(p.action(), target, operationName, time.Since(start))
+	return info, nil
+}
+
+// waitWithProgress polls the operation until done, emitting an apply_progress
+// event whenever the reported percentage changes. It replaces op.Wait, which
+// blocks without exposing the operation metadata.
+func (p *Plan) waitWithProgress(ctx context.Context, op *spannerAdmin.UpdateDatabaseDdlOperation, target output.Resource, start time.Time, info *LroInfo, lastPercent *int32) error {
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+	for {
+		if md, mdErr := op.Metadata(); mdErr == nil && md != nil {
+			info.Throttled = md.GetThrottled()
+			info.CommitTimestamps = commitTimestamps(md)
+			if progress := md.GetProgress(); len(progress) > 0 {
+				if pct := progress[0].GetProgressPercent(); pct != *lastPercent {
+					*lastPercent = pct
+					output.ApplyProgress(target, op.Name(), pct, md.GetThrottled(), time.Since(start))
+				}
+			}
+		}
+		if op.Done() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+		if err := op.Poll(ctx); err != nil {
+			return err
+		}
+	}
+}
+
+func commitTimestamps(md *spannerPb.UpdateDatabaseDdlMetadata) []string {
+	var timestamps []string
+	for _, ts := range md.GetCommitTimestamps() {
+		timestamps = append(timestamps, ts.AsTime().UTC().Format(time.RFC3339Nano))
+	}
+	return timestamps
 }
 
 func (p *Plan) Statement() string {
@@ -260,11 +375,23 @@ func deployCmd() *cobra.Command {
 		Use:   "deploy",
 		Short: "Deploy protobundle changes to a Spanner database",
 		Args:  planOrDeployArgValidation,
-		Run: func(cmd *cobra.Command, args []string) {
-			plan := NewPlan(cmd, args)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			plan, err := NewPlan(cmd, args)
+			if err != nil {
+				return err
+			}
 			defer plan.Close()
-			plan.Print(&diff.PrintOptions{})
-			plan.Deploy(cmd.Context())
+			plan.Emit(output.Get(), output.SpannerType(plan.Database), "deploy", &diff.PrintOptions{})
+			lro, err := plan.Deploy(cmd.Context())
+			if lro == nil {
+				return err
+			}
+			output.Result(deployResult{
+				planResult: plan.result("deploy"),
+				Lro:        lro,
+				Success:    err == nil,
+			})
+			return err
 		},
 	}
 	return cmd

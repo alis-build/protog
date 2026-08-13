@@ -9,8 +9,8 @@ require (
 	github.com/golang/protobuf v1.5.4
 	github.com/pseudomuto/protokit v0.2.1
 	github.com/spf13/cobra v1.10.2
-	go.alis.build/alog v0.1.0
 	google.golang.org/api v0.283.0
+	google.golang.org/grpc v1.81.1
 	google.golang.org/protobuf v1.36.11
 )
 
@@ -69,5 +69,4 @@ require (
 	google.golang.org/genproto v0.0.0-20260319201613-d00831a3d3e7 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
-	google.golang.org/grpc v1.81.1 // indirect
 )

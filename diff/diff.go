@@ -2,19 +2,26 @@
 package diff
 
 import (
-	"strconv"
+	"slices"
 	"strings"
+
+	"github.com/alis-build/protog/output"
 )
 
 type Diff struct {
-	Ignore []string
-	Create []string
-	Update []string
-	Delete []string
+	Ignore []string `json:"ignore"`
+	Create []string `json:"create"`
+	Update []string `json:"update"`
+	Delete []string `json:"delete"`
 }
 
 func New(current map[string]struct{}, desired map[string]struct{}, packageIDs []string) *Diff {
-	diff := &Diff{}
+	diff := &Diff{
+		Ignore: []string{},
+		Create: []string{},
+		Update: []string{},
+		Delete: []string{},
+	}
 	for item := range desired {
 		if _, ok := current[item]; !ok {
 			// Keep creating missing imported types because a target package can
@@ -35,6 +42,10 @@ func New(current map[string]struct{}, desired map[string]struct{}, packageIDs []
 			diff.Delete = append(diff.Delete, item)
 		}
 	}
+	slices.Sort(diff.Ignore)
+	slices.Sort(diff.Create)
+	slices.Sort(diff.Update)
+	slices.Sort(diff.Delete)
 	return diff
 }
 
@@ -56,28 +67,42 @@ type PrintOptions struct {
 	NoUpdates    bool
 }
 
-func (d *Diff) Print(opts *PrintOptions) {
+// Summary returns the diff counts for the given operation ("plan" or
+// "deploy").
+func (d *Diff) Summary(operation string) output.Summary {
+	return output.Summary{
+		Add:       len(d.Create),
+		Change:    len(d.Update),
+		Remove:    len(d.Delete),
+		Ignore:    len(d.Ignore),
+		Operation: operation,
+	}
+}
+
+// Emit reports the diff as planned_change events followed by a
+// change_summary. item is the resource template for a single entry (kind plus
+// database/project); each entry fills in its name.
+func (d *Diff) Emit(em output.Emitter, item output.Resource, operation string, opts *PrintOptions) {
 	if opts.PrintIgnored {
-		for _, topic := range d.Ignore {
-			println("\033[37mIGNORE " + topic + "\033[0m")
+		for _, name := range d.Ignore {
+			em.PlannedChange(output.ActionNoop, item.Named(name))
 		}
 	}
-	for _, item := range d.Create {
-		println("➕ CREATE " + item)
+	for _, name := range d.Create {
+		em.PlannedChange(output.ActionCreate, item.Named(name))
 	}
 	if !opts.NoUpdates {
-		for _, item := range d.Update {
-			println("✏️ UPDATE " + item)
+		for _, name := range d.Update {
+			em.PlannedChange(output.ActionUpdate, item.Named(name))
 		}
 	}
-	for _, item := range d.Delete {
-		println("🗑️ DELETE " + item)
+	for _, name := range d.Delete {
+		em.PlannedChange(output.ActionDelete, item.Named(name))
 	}
-	println()
-	println("TOTAL IGNORED: " + strconv.Itoa(len(d.Ignore)))
-	println("TOTAL TO CREATE: " + strconv.Itoa(len(d.Create)))
-	if !opts.NoUpdates {
-		println("TOTAL TO UPDATE: " + strconv.Itoa(len(d.Update)))
+	s := d.Summary(operation)
+	if opts.NoUpdates {
+		s.Change = 0
+		s.SkipUpdates = true
 	}
-	println("TOTAL TO DELETE: " + strconv.Itoa(len(d.Delete)))
+	em.ChangeSummary(s)
 }
