@@ -109,7 +109,7 @@ type Emitter interface {
 	PlannedChange(action Action, resource Resource)
 	ChangeSummary(s Summary)
 	ApplyStart(action Action, resource Resource, detail string)
-	ApplyProgress(resource Resource, operation string, percent int32, throttled bool, elapsed time.Duration)
+	ApplyProgress(action Action, resource Resource, operation string, percent int32, throttled bool, elapsed time.Duration)
 	ApplyComplete(action Action, resource Resource, operation string, elapsed time.Duration)
 	ApplyErrored(action Action, resource Resource, err error, elapsed time.Duration)
 	AuthRetry(reason string, attempt int)
@@ -158,8 +158,8 @@ func PlannedChange(action Action, resource Resource) { current.PlannedChange(act
 
 func ApplyStart(action Action, r Resource, detail string) { current.ApplyStart(action, r, detail) }
 
-func ApplyProgress(r Resource, op string, pct int32, throttled bool, elapsed time.Duration) {
-	current.ApplyProgress(r, op, pct, throttled, elapsed)
+func ApplyProgress(action Action, r Resource, op string, pct int32, throttled bool, elapsed time.Duration) {
+	current.ApplyProgress(action, r, op, pct, throttled, elapsed)
 }
 
 func ApplyComplete(action Action, r Resource, op string, elapsed time.Duration) {
@@ -189,6 +189,9 @@ func refreshCompleteMessage(target Resource, existing int) string {
 
 func applyStartMessage(action Action, r Resource) string {
 	if r.Kind == "spanner_database" {
+		if action == ActionDelete {
+			return "Destroying proto bundles..."
+		}
 		return "Deploying proto bundles..."
 	}
 	return applyVerb(action, "Creating", "Updating", "Deleting") + " topic " + r.Name
@@ -196,6 +199,9 @@ func applyStartMessage(action Action, r Resource) string {
 
 func applyCompleteMessage(action Action, r Resource) string {
 	if r.Kind == "spanner_database" {
+		if action == ActionDelete {
+			return "Proto bundles destroyed"
+		}
 		return "Proto bundles deployed"
 	}
 	return applyVerb(action, "Created", "Updated", "Deleted") + " topic " + r.Name
@@ -203,6 +209,9 @@ func applyCompleteMessage(action Action, r Resource) string {
 
 func applyErroredMessage(action Action, r Resource, err error) string {
 	if r.Kind == "spanner_database" {
+		if action == ActionDelete {
+			return fmt.Sprintf("Error destroying proto bundles: %v", err)
+		}
 		return fmt.Sprintf("Error deploying proto bundles: %v", err)
 	}
 	return fmt.Sprintf("Error %s topic %s: %v",
@@ -222,8 +231,17 @@ func applyVerb(action Action, create, update, del string) string {
 
 func summaryMessage(s Summary) string {
 	title := "Plan"
-	if s.Operation == "deploy" {
+	switch s.Operation {
+	case "deploy":
 		title = "Deploy"
+	case "destroy":
+		title = "Destroy"
+	case "plandestroy":
+		title = "Plan destroy"
+	}
+	if s.SkipUpdates {
+		return fmt.Sprintf("%s: %d to create, %d to delete (%d ignored)",
+			title, s.Add, s.Remove, s.Ignore)
 	}
 	return fmt.Sprintf("%s: %d to create, %d to update, %d to delete (%d ignored)",
 		title, s.Add, s.Change, s.Remove, s.Ignore)

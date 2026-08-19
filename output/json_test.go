@@ -50,7 +50,7 @@ func TestJSONEventStream(t *testing.T) {
 	j.PlannedChange(ActionCreate, SpannerType(database).Named("alis.aa.library.v1.Book"))
 	j.ChangeSummary(Summary{Add: 1, Ignore: 2, Operation: "plan"})
 	j.ApplyStart(ActionUpdate, target, "ALTER PROTO BUNDLE")
-	j.ApplyProgress(target, "op-1", 60, true, 1500*time.Millisecond)
+	j.ApplyProgress(ActionUpdate, target, "op-1", 60, true, 1500*time.Millisecond)
 	j.ApplyComplete(ActionUpdate, target, "op-1", 3*time.Second)
 	j.ApplyErrored(ActionCreate, PubsubTopic("proj").Named("a.b.v1.XEvent"), errors.New("boom"), time.Second)
 	j.AuthRetry("cached credential rejected", 2)

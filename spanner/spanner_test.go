@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/alis-build/protog/diff"
+	"github.com/alis-build/protog/output"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -84,5 +86,40 @@ func TestRetryUnauthenticatedStopsAfterOneRetry(t *testing.T) {
 	}
 	if calls != 2 || refreshes != 1 {
 		t.Fatalf("retryUnauthenticated() calls = %d, refreshes = %d; want 2, 1", calls, refreshes)
+	}
+}
+
+func destroyPlan(existing int, delete ...string) *Plan {
+	return &Plan{
+		ExistingTypes: existing,
+		Destroy:       true,
+		Diff:          &diff.Diff{Delete: delete},
+	}
+}
+
+func TestDestroyStatementDeletesRequestedTypes(t *testing.T) {
+	p := destroyPlan(3, "alis.aa.library.v1.Book", "alis.aa.library.v1.Author")
+	want := "ALTER PROTO BUNDLE DELETE(`alis.aa.library.v1.Book`,`alis.aa.library.v1.Author`)"
+	if got := p.Statement(); got != want {
+		t.Fatalf("Statement() = %q, want %q", got, want)
+	}
+	if got := p.action(); got != output.ActionDelete {
+		t.Fatalf("action() = %q, want %q", got, output.ActionDelete)
+	}
+}
+
+func TestDestroyStatementNeverDropsTheBundle(t *testing.T) {
+	// Removing every remaining type still deletes members; the bundle itself
+	// is never dropped.
+	p := destroyPlan(2, "alis.aa.library.v1.Book", "alis.aa.library.v1.Author")
+	want := "ALTER PROTO BUNDLE DELETE(`alis.aa.library.v1.Book`,`alis.aa.library.v1.Author`)"
+	if got := p.Statement(); got != want {
+		t.Fatalf("Statement() = %q, want %q", got, want)
+	}
+}
+
+func TestDestroyStatementEmptyWhenNothingToDelete(t *testing.T) {
+	if got := destroyPlan(2).Statement(); got != "" {
+		t.Fatalf("Statement() = %q, want empty", got)
 	}
 }

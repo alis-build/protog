@@ -23,11 +23,13 @@ import (
 func Command() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "spanner",
-		Short: "View, plan or deploy protobundles to a Spanner database",
+		Short: "View, plan, deploy or destroy protobundles in a Spanner database",
 	}
 	cmd.AddCommand(viewCmd())
 	cmd.AddCommand(planCmd())
 	cmd.AddCommand(deployCmd())
+	cmd.AddCommand(planDestroyCmd())
+	cmd.AddCommand(destroyCmd())
 	return cmd
 }
 
@@ -223,7 +225,7 @@ func NewPlan(cmd *cobra.Command, args []string) (*Plan, error) {
 		Database: database,
 		FdsBytes: fdsBytes,
 	}
-	plan.NoExistingTypes = len(bundles) == 0
+	plan.ExistingTypes = len(bundles)
 	var packageIDs []string
 	if len(args) > 2 {
 		packageIDs = args[2:]
@@ -233,10 +235,14 @@ func NewPlan(cmd *cobra.Command, args []string) (*Plan, error) {
 }
 
 type Plan struct {
-	Client          *spannerAdmin.DatabaseAdminClient
-	Database        string
-	FdsBytes        []byte
-	NoExistingTypes bool
+	Client   *spannerAdmin.DatabaseAdminClient
+	Database string
+	FdsBytes []byte
+	// ExistingTypes counts the types already in the database's proto bundle.
+	ExistingTypes int
+	// Destroy marks a plan whose desired state is empty: every existing type
+	// in the requested packages is removed and no descriptors are uploaded.
+	Destroy bool
 	*diff.Diff
 }
 
@@ -260,10 +266,14 @@ func (p *Plan) result(operation string) planResult {
 }
 
 func (p *Plan) action() output.Action {
-	if p.NoExistingTypes {
+	switch {
+	case p.Destroy:
+		return output.ActionDelete
+	case p.ExistingTypes == 0:
 		return output.ActionCreate
+	default:
+		return output.ActionUpdate
 	}
-	return output.ActionUpdate
 }
 
 // Deploy submits the proto bundle DDL and waits for the long-running
@@ -327,7 +337,7 @@ func (p *Plan) waitWithProgress(ctx context.Context, op *spannerAdmin.UpdateData
 			if progress := md.GetProgress(); len(progress) > 0 {
 				if pct := progress[0].GetProgressPercent(); pct != *lastPercent {
 					*lastPercent = pct
-					output.ApplyProgress(target, op.Name(), pct, md.GetThrottled(), time.Since(start))
+					output.ApplyProgress(p.action(), target, op.Name(), pct, md.GetThrottled(), time.Since(start))
 				}
 			}
 		}
@@ -353,8 +363,15 @@ func commitTimestamps(md *spannerPb.UpdateDatabaseDdlMetadata) []string {
 	return timestamps
 }
 
+// Statement renders the DDL for the plan, or "" when there is nothing to do.
 func (p *Plan) Statement() string {
-	if p.NoExistingTypes {
+	if p.Destroy {
+		if len(p.Delete) == 0 {
+			return ""
+		}
+		return fmt.Sprintf("ALTER PROTO BUNDLE DELETE(`%s`)", strings.Join(p.Delete, "`,`"))
+	}
+	if p.ExistingTypes == 0 {
 		return fmt.Sprintf("CREATE PROTO BUNDLE (`%s`)", strings.Join(p.Create, "`,`"))
 	}
 	statement := "ALTER PROTO BUNDLE"
@@ -388,6 +405,88 @@ func deployCmd() *cobra.Command {
 			}
 			output.Result(deployResult{
 				planResult: plan.result("deploy"),
+				Lro:        lro,
+				Success:    err == nil,
+			})
+			return err
+		},
+	}
+	return cmd
+}
+
+func destroyArgValidation(cmd *cobra.Command, args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("expecting '{projectID}/{spannerInstance}/{database}' {packageID} (optional additional package IDs)")
+	}
+	if len(strings.Split(args[0], "/")) != 3 {
+		return fmt.Errorf("expecting '{projectID}/{spannerInstance}/{database}' as the first argument")
+	}
+	return nil
+}
+
+// NewDestroyPlan plans the removal of every existing proto bundle type owned
+// by the requested packages. There is no fds file: the desired state is empty,
+// so the diff reduces to deletes for the requested packages and ignores for
+// everything else.
+func NewDestroyPlan(cmd *cobra.Command, args []string) (*Plan, error) {
+	dbParts := strings.Split(args[0], "/")
+	database := fmt.Sprintf("projects/%s/instances/%s/databases/%s", dbParts[0], dbParts[1], dbParts[2])
+	client, bundles, err := clientAndProtobundles(cmd.Context(), database)
+	if err != nil {
+		return nil, fmt.Errorf("viewing proto bundles: %w", err)
+	}
+	plan := &Plan{
+		Client:        client,
+		Database:      database,
+		ExistingTypes: len(bundles),
+		Destroy:       true,
+	}
+	plan.Diff = diff.New(bundles, nil, args[1:])
+	return plan, nil
+}
+
+func planDestroyCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "plandestroy",
+		Short: "Preview the protobundle types a destroy would remove",
+		Args:  destroyArgValidation,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			plan, err := NewDestroyPlan(cmd, args)
+			if err != nil {
+				return err
+			}
+			defer plan.Close()
+			plan.Emit(output.Get(), output.SpannerType(plan.Database), "plandestroy", &diff.PrintOptions{PrintIgnored: true, NoUpdates: true})
+			output.Result(plan.result("plandestroy"))
+			return nil
+		},
+	}
+	return cmd
+}
+
+func destroyCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "destroy",
+		Short: "Remove a package's protobundle types from a Spanner database",
+		Args:  destroyArgValidation,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			plan, err := NewDestroyPlan(cmd, args)
+			if err != nil {
+				return err
+			}
+			defer plan.Close()
+			plan.Emit(output.Get(), output.SpannerType(plan.Database), "destroy", &diff.PrintOptions{NoUpdates: true})
+			if len(plan.Delete) == 0 {
+				output.Log("No proto bundle types to destroy")
+				output.Result(deployResult{planResult: plan.result("destroy"), Success: true})
+				return nil
+			}
+			lro, err := plan.Deploy(cmd.Context())
+			if lro == nil {
+				return err
+			}
+			output.Result(deployResult{
+				planResult: plan.result("destroy"),
 				Lro:        lro,
 				Success:    err == nil,
 			})

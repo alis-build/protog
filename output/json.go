@@ -170,13 +170,13 @@ func (j *JSON) ApplyStart(action Action, resource Resource, detail string) {
 	})
 }
 
-func (j *JSON) ApplyProgress(resource Resource, operation string, percent int32, throttled bool, elapsed time.Duration) {
+func (j *JSON) ApplyProgress(action Action, resource Resource, operation string, percent int32, throttled bool, elapsed time.Duration) {
 	j.emit(envelope{
-		Message: fmt.Sprintf("%s: %d%%", applyStartMessage(ActionUpdate, resource), percent),
+		Message: fmt.Sprintf("%s: %d%%", applyStartMessage(action, resource), percent),
 		Type:    "apply_progress",
 		Hook: &hookPayload{
 			Resource:       resource,
-			Action:         ActionUpdate,
+			Action:         action,
 			Operation:      operation,
 			Percent:        &percent,
 			Throttled:      throttled,

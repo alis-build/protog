@@ -23,11 +23,13 @@ import (
 func Command() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "pubsub",
-		Short: "View, plan or deploy pubsub topics from `message {Topic}Event` messages",
+		Short: "View, plan, deploy or destroy pubsub topics from `message {Topic}Event` messages",
 	}
 	cmd.AddCommand(viewCmd())
 	cmd.AddCommand(planCmd())
 	cmd.AddCommand(deployCmd())
+	cmd.AddCommand(planDestroyCmd())
+	cmd.AddCommand(destroyCmd())
 	return cmd
 }
 
@@ -301,6 +303,70 @@ func deployCmd() *cobra.Command {
 			results, err := plan.Deploy(cmd.Context())
 			output.Result(deployResult{
 				planResult: plan.result("deploy"),
+				Results:    results,
+				Success:    err == nil,
+			})
+			return err
+		},
+	}
+	return cmd
+}
+
+func destroyArgValidation(cmd *cobra.Command, args []string) error {
+	if len(args) < 2 {
+		return errors.New("expecting {projectID} {packageID} (optional additional package IDs)")
+	}
+	return nil
+}
+
+// NewDestroyPlan plans the removal of every existing topic owned by the
+// requested packages. There is no fds file: the desired state is empty, so the
+// diff reduces to deletes for the requested packages and ignores for
+// everything else.
+func NewDestroyPlan(ctx context.Context, args []string) (*Plan, error) {
+	client, eventTopics, err := clientAndTopics(ctx, args[0])
+	if err != nil {
+		return nil, fmt.Errorf("view pubsub topics for %s: %w", args[0], err)
+	}
+	plan := &Plan{Client: client, Project: args[0]}
+	plan.Diff = diff.New(eventTopics, nil, args[1:])
+	return plan, nil
+}
+
+func planDestroyCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "plandestroy",
+		Short: "Preview the topics a destroy would remove",
+		Args:  destroyArgValidation,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			plan, err := NewDestroyPlan(cmd.Context(), args)
+			if err != nil {
+				return err
+			}
+			defer plan.Client.Close()
+			plan.Emit(output.Get(), output.PubsubTopic(plan.Project), "plandestroy", &diff.PrintOptions{PrintIgnored: true, NoUpdates: true})
+			output.Result(plan.result("plandestroy"))
+			return nil
+		},
+	}
+	return cmd
+}
+
+func destroyCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "destroy",
+		Short: "Delete a package's topics from a Google Project",
+		Args:  destroyArgValidation,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			plan, err := NewDestroyPlan(cmd.Context(), args)
+			if err != nil {
+				return err
+			}
+			defer plan.Client.Close()
+			plan.Emit(output.Get(), output.PubsubTopic(plan.Project), "destroy", &diff.PrintOptions{NoUpdates: true})
+			results, err := plan.Deploy(cmd.Context())
+			output.Result(deployResult{
+				planResult: plan.result("destroy"),
 				Results:    results,
 				Success:    err == nil,
 			})

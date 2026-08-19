@@ -75,7 +75,7 @@ func (h *Human) ApplyStart(action Action, resource Resource, detail string) {
 	}
 }
 
-func (h *Human) ApplyProgress(resource Resource, _ string, percent int32, throttled bool, _ time.Duration) {
+func (h *Human) ApplyProgress(_ Action, resource Resource, _ string, percent int32, throttled bool, _ time.Duration) {
 	msg := fmt.Sprintf("Progress: %d%%", percent)
 	if throttled {
 		msg += " (throttled)"
