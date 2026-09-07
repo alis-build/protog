@@ -282,8 +282,18 @@ func (p *Plan) action() output.Action {
 func (p *Plan) Deploy(ctx context.Context) (*LroInfo, error) {
 	target := output.SpannerDatabase(p.Database)
 	statement := p.Statement()
-	output.ApplyStart(p.action(), target, statement)
 	start := time.Now()
+	if statement == "" {
+		output.ApplyStart(p.action(), target, "No changes")
+		output.ApplyComplete(p.action(), target, "No changes", time.Since(start))
+		return &LroInfo{
+			Name:             "operations/none",
+			Done:             true,
+			Throttled:        false,
+			CommitTimestamps: []string{},
+		}, nil
+	}
+	output.ApplyStart(p.action(), target, statement)
 	request := &spannerPb.UpdateDatabaseDdlRequest{
 		Database:         p.Database,
 		Statements:       []string{statement},
@@ -373,7 +383,7 @@ func (p *Plan) Statement() string {
 	}
 	if p.ExistingTypes == 0 {
 		if len(p.Create) == 0 {
-			return "select 'No proto bundle types to deploy'"
+			return ""
 		}
 		return fmt.Sprintf("CREATE PROTO BUNDLE (`%s`)", strings.Join(p.Create, "`,`"))
 	}
