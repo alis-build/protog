@@ -372,6 +372,9 @@ func (p *Plan) Statement() string {
 		return fmt.Sprintf("ALTER PROTO BUNDLE DELETE(`%s`)", strings.Join(p.Delete, "`,`"))
 	}
 	if p.ExistingTypes == 0 {
+		if len(p.Create) == 0 {
+			return "select 'No proto bundle types to deploy'"
+		}
 		return fmt.Sprintf("CREATE PROTO BUNDLE (`%s`)", strings.Join(p.Create, "`,`"))
 	}
 	statement := "ALTER PROTO BUNDLE"
