@@ -62,7 +62,7 @@ func viewCmd() *cobra.Command {
 				return fmt.Errorf("viewing proto bundles: %w", err)
 			}
 			defer client.Close()
-			output.Result(viewResult{Database: database, Types: slices.Sorted(maps.Keys(bundles))})
+			output.Result(viewResult{Database: database, Types: slices.Sorted(maps.Keys(bundles.Types))})
 			return nil
 		},
 	}
@@ -77,13 +77,13 @@ func SpannerAdmin(ctx context.Context) (*spannerAdmin.DatabaseAdminClient, error
 	return client, nil
 }
 
-func clientAndProtobundles(ctx context.Context, database string) (*spannerAdmin.DatabaseAdminClient, map[string]struct{}, error) {
+func clientAndProtobundles(ctx context.Context, database string) (*spannerAdmin.DatabaseAdminClient, *bundleSnapshot, error) {
 	client, err := SpannerAdmin(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
 	bundles, err := retryUnauthenticated(
-		func() (map[string]struct{}, error) {
+		func() (*bundleSnapshot, error) {
 			return viewProtobundles(ctx, client, database)
 		},
 		func() error {
@@ -127,30 +127,32 @@ func retryUnauthenticated[T any](fn func() (T, error), refresh func() error) (T,
 	return fn()
 }
 
-func viewProtobundles(ctx context.Context, client *spannerAdmin.DatabaseAdminClient, database string) (map[string]struct{}, error) {
+func viewProtobundles(ctx context.Context, client *spannerAdmin.DatabaseAdminClient, database string) (*bundleSnapshot, error) {
 	target := output.SpannerDatabase(database)
 	output.RefreshStart(target)
-	bundles := map[string]struct{}{}
+	bundles := &bundleSnapshot{Types: map[string]struct{}{}}
 	getDatabaseDdlRes, err := client.GetDatabaseDdl(ctx, &spannerPb.GetDatabaseDdlRequest{
 		Database: database,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("spanner.GetDatabaseDdl: %w", err)
 	}
+	bundles.Descriptors = getDatabaseDdlRes.GetProtoDescriptors()
 	for _, ddl := range getDatabaseDdlRes.GetStatements() {
 		if strings.HasPrefix(ddl, "CREATE PROTO BUNDLE") {
-			commaSepTypes := strings.TrimPrefix(ddl, "CREATE PROTO BUNDLE (\n")
-			for t := range strings.SplitSeq(commaSepTypes, ",\n") {
-				t = strings.Trim(t, " ")
+			commaSepTypes := strings.TrimSpace(strings.TrimPrefix(ddl, "CREATE PROTO BUNDLE"))
+			commaSepTypes = strings.TrimSuffix(strings.TrimPrefix(commaSepTypes, "("), ")")
+			for t := range strings.SplitSeq(commaSepTypes, ",") {
+				t = strings.TrimSpace(t)
 				t = strings.Trim(t, "`")
 				if t == "" || t == ")" {
 					continue
 				}
-				bundles[t] = struct{}{}
+				bundles.Types[t] = struct{}{}
 			}
 		}
 	}
-	output.RefreshComplete(target, len(bundles))
+	output.RefreshComplete(target, len(bundles.Types))
 	return bundles, nil
 }
 
@@ -225,12 +227,16 @@ func NewPlan(cmd *cobra.Command, args []string) (*Plan, error) {
 		Database: database,
 		FdsBytes: fdsBytes,
 	}
-	plan.ExistingTypes = len(bundles)
+	plan.ExistingTypes = len(bundles.Types)
 	var packageIDs []string
 	if len(args) > 2 {
 		packageIDs = args[2:]
 	}
-	plan.Diff = diff.New(bundles, fdsTypes, packageIDs)
+	plan.Diff = diff.New(bundles.Types, fdsTypes, packageIDs)
+	if err := removeUnchangedUpdates(plan.Diff, bundles.Descriptors, fdsBytes); err != nil {
+		plan.Close()
+		return nil, err
+	}
 	return plan, nil
 }
 
@@ -387,6 +393,9 @@ func (p *Plan) Statement() string {
 		}
 		return fmt.Sprintf("CREATE PROTO BUNDLE (`%s`)", strings.Join(p.Create, "`,`"))
 	}
+	if len(p.Create)+len(p.Update)+len(p.Delete) == 0 {
+		return ""
+	}
 	statement := "ALTER PROTO BUNDLE"
 	if len(p.Create) > 0 {
 		statement += " " + fmt.Sprintf("INSERT(`%s`)", strings.Join(p.Create, "`,`"))
@@ -451,10 +460,10 @@ func NewDestroyPlan(cmd *cobra.Command, args []string) (*Plan, error) {
 	plan := &Plan{
 		Client:        client,
 		Database:      database,
-		ExistingTypes: len(bundles),
+		ExistingTypes: len(bundles.Types),
 		Destroy:       true,
 	}
-	plan.Diff = diff.New(bundles, nil, args[1:])
+	plan.Diff = diff.New(bundles.Types, nil, args[1:])
 	return plan, nil
 }
 
