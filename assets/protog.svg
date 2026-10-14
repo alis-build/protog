@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 320" role="img" aria-labelledby="title desc">
+  <title id="title">protog: proto contracts planned and deployed to Spanner and Pub/Sub</title>
+  <desc id="desc">A FileDescriptorSet flows into protog, which fans out to a Spanner proto bundle and Pub/Sub topics.</desc>
+
+  <defs>
+    <filter id="node-shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="10" flood-color="#000000" flood-opacity="0.28"/>
+    </filter>
+    <linearGradient id="flow-in" gradientUnits="userSpaceOnUse" x1="258" x2="392" y1="0" y2="0">
+      <stop offset="0" stop-color="#9a9a9a"/>
+      <stop offset="1" stop-color="#f02222"/>
+    </linearGradient>
+    <linearGradient id="flow-spanner" gradientUnits="userSpaceOnUse" x1="568" x2="712" y1="0" y2="0">
+      <stop offset="0" stop-color="#f02222"/>
+      <stop offset="1" stop-color="#5bb7ff"/>
+    </linearGradient>
+    <linearGradient id="flow-pubsub" gradientUnits="userSpaceOnUse" x1="568" x2="712" y1="0" y2="0">
+      <stop offset="0" stop-color="#f02222"/>
+      <stop offset="1" stop-color="#52d6a3"/>
+    </linearGradient>
+    <radialGradient id="center-fill" cx="50%" cy="48%" r="58%">
+      <stop offset="0" stop-color="#343434"/>
+      <stop offset="1" stop-color="#252525"/>
+    </radialGradient>
+    <filter id="alis-goo">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="2.6" result="blur"/>
+      <feColorMatrix in="blur" mode="matrix" values="
+        1 0 0 0 0
+        0 1 0 0 0
+        0 0 1 0 0
+        0 0 0 19 -8
+      " result="goo"/>
+      <feBlend in="SourceGraphic" in2="goo"/>
+    </filter>
+  </defs>
+
+  <rect width="960" height="320" rx="12" fill="#202020"/>
+
+  <!-- background contours -->
+  <path d="M60 250 C220 206 330 262 480 228 C630 194 720 220 900 178" fill="none" stroke="#3a3a3a" stroke-width="1.5" opacity="0.28"/>
+  <path d="M70 70 C230 124 330 84 480 100 C630 116 720 70 890 88" fill="none" stroke="#3a3a3a" stroke-width="1.5" opacity="0.24"/>
+
+  <!-- connections -->
+  <path d="M258 160 C310 160 330 160 392 160" fill="none" stroke="url(#flow-in)" stroke-linecap="round" stroke-width="4" opacity="0.85"/>
+  <path d="M568 160 C640 160 640 98 712 98" fill="none" stroke="url(#flow-spanner)" stroke-linecap="round" stroke-width="4" opacity="0.85"/>
+  <path d="M568 160 C640 160 640 222 712 222" fill="none" stroke="url(#flow-pubsub)" stroke-linecap="round" stroke-width="4" opacity="0.85"/>
+
+  <!-- traveling dots -->
+  <g fill="#f02222" opacity="0.95">
+    <circle cx="300" cy="160" r="4.5"/>
+    <circle cx="346" cy="160" r="4.5"/>
+  </g>
+  <g fill="#5bb7ff" opacity="0.95">
+    <circle cx="622" cy="138" r="4.5"/>
+    <circle cx="672" cy="100" r="4.5"/>
+  </g>
+  <g fill="#52d6a3" opacity="0.95">
+    <circle cx="622" cy="182" r="4.5"/>
+    <circle cx="672" cy="220" r="4.5"/>
+  </g>
+
+  <g filter="url(#node-shadow)">
+    <!-- left: proto contracts card -->
+    <g transform="translate(70 92)">
+      <rect x="0" y="0" width="188" height="136" rx="12" fill="#2b2b2b" stroke="#474747" stroke-width="2"/>
+      <rect x="0" y="0" width="188" height="30" rx="12" fill="#333333"/>
+      <rect x="0" y="18" width="188" height="12" fill="#333333"/>
+      <circle cx="16" cy="15" r="4" fill="#f02222" opacity="0.9"/>
+      <circle cx="30" cy="15" r="4" fill="#5bb7ff" opacity="0.8"/>
+      <circle cx="44" cy="15" r="4" fill="#52d6a3" opacity="0.8"/>
+      <text x="176" y="20" text-anchor="end" fill="#8a8a8a" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">orders.proto</text>
+      <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5">
+        <text x="14" y="54" fill="#c4c4c4"><tspan fill="#5bb7ff">package</tspan> orders.v1;</text>
+        <text x="14" y="76" fill="#c4c4c4"><tspan fill="#f06a6a">message</tspan> Order {</text>
+        <text x="28" y="96" fill="#c4c4c4"><tspan fill="#52d6a3">string</tspan> id = 1;</text>
+        <text x="14" y="116" fill="#c4c4c4">}</text>
+      </g>
+      <text x="94" y="162" text-anchor="middle" fill="#d4d4d4" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="18" font-weight="700">Proto contracts</text>
+    </g>
+
+    <!-- center: protog -->
+    <g transform="translate(400 88)">
+      <circle cx="80" cy="72" r="66" fill="url(#center-fill)" stroke="#f02222" stroke-opacity="0.75" stroke-width="2.5"/>
+      <circle cx="80" cy="72" r="49" fill="#1f1f1f" stroke="#f02222" stroke-opacity="0.4" stroke-width="1.5"/>
+      <g transform="translate(45 37) scale(0.55)">
+        <style>
+          .alis-dot { fill: #f02222; opacity: 0.92; }
+          .alis-goo-dot { fill: #f02222; opacity: 0.94; }
+        </style>
+        <g filter="url(#alis-goo)">
+          <circle class="alis-goo-dot" cx="64.0006" cy="23.742" r="7.7339"/>
+          <circle class="alis-goo-dot" cx="84.1075" cy="23.742" r="7.7339"/>
+          <circle class="alis-goo-dot" cx="64.0006" cy="43.8713" r="7.7339"/>
+          <circle class="alis-goo-dot" cx="84.1075" cy="43.8713" r="7.7339"/>
+          <circle class="alis-goo-dot" cx="43.8939" cy="64" r="7.7339"/>
+          <circle class="alis-goo-dot" cx="64.0006" cy="64" r="7.7339"/>
+          <circle class="alis-goo-dot" cx="84.1075" cy="64" r="7.7339"/>
+          <circle class="alis-goo-dot" cx="43.8939" cy="84.1294" r="7.7339"/>
+          <circle class="alis-goo-dot" cx="64.0006" cy="84.1294" r="7.7339"/>
+          <circle class="alis-goo-dot" cx="43.8939" cy="104.258" r="7.7339"/>
+          <circle class="alis-goo-dot" cx="64.0006" cy="104.258" r="7.7339"/>
+        </g>
+        <g>
+          <circle class="alis-dot" cx="64.0006" cy="23.742" r="7.7339"/>
+          <circle class="alis-dot" cx="84.1075" cy="23.742" r="7.7339"/>
+          <circle class="alis-dot" cx="64.0006" cy="43.8713" r="7.7339"/>
+          <circle class="alis-dot" cx="84.1075" cy="43.8713" r="7.7339"/>
+          <circle class="alis-dot" cx="43.8939" cy="64" r="7.7339"/>
+          <circle class="alis-dot" cx="64.0006" cy="64" r="7.7339"/>
+          <circle class="alis-dot" cx="84.1075" cy="64" r="7.7339"/>
+          <circle class="alis-dot" cx="43.8939" cy="84.1294" r="7.7339"/>
+          <circle class="alis-dot" cx="64.0006" cy="84.1294" r="7.7339"/>
+          <circle class="alis-dot" cx="43.8939" cy="104.258" r="7.7339"/>
+          <circle class="alis-dot" cx="64.0006" cy="104.258" r="7.7339"/>
+        </g>
+      </g>
+      <text x="80" y="166" text-anchor="middle" fill="#f2f2f2" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="22" font-weight="800">protog</text>
+      <text x="80" y="186" text-anchor="middle" fill="#9a9a9a" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">plan · deploy · destroy</text>
+    </g>
+
+    <!-- right top: Spanner -->
+    <g transform="translate(712 62)">
+      <rect x="0" y="0" width="178" height="72" rx="12" fill="#2b2b2b" stroke="#5bb7ff" stroke-opacity="0.7" stroke-width="2"/>
+      <g transform="translate(16 18)">
+        <ellipse cx="18" cy="8" rx="16" ry="6" fill="none" stroke="#5bb7ff" stroke-width="2"/>
+        <path d="M2 8 V28 C2 31.3 9.2 34 18 34 C26.8 34 34 31.3 34 28 V8" fill="none" stroke="#5bb7ff" stroke-width="2"/>
+        <path d="M2 18 C2 21.3 9.2 24 18 24 C26.8 24 34 21.3 34 18" fill="none" stroke="#5bb7ff" stroke-width="2" opacity="0.7"/>
+      </g>
+      <text x="66" y="31" fill="#f2f2f2" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="17" font-weight="700">Spanner</text>
+      <text x="66" y="52" fill="#9a9a9a" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5">PROTO BUNDLE</text>
+    </g>
+
+    <!-- right bottom: Pub/Sub -->
+    <g transform="translate(712 186)">
+      <rect x="0" y="0" width="178" height="72" rx="12" fill="#2b2b2b" stroke="#52d6a3" stroke-opacity="0.7" stroke-width="2"/>
+      <g transform="translate(16 18)">
+        <circle cx="18" cy="18" r="6" fill="none" stroke="#52d6a3" stroke-width="2"/>
+        <circle cx="18" cy="2" r="2.6" fill="#52d6a3"/>
+        <circle cx="4" cy="27" r="2.6" fill="#52d6a3"/>
+        <circle cx="32" cy="27" r="2.6" fill="#52d6a3"/>
+        <path d="M18 5 V12 M6.5 25 L12.8 21.5 M29.5 25 L23.2 21.5" stroke="#52d6a3" stroke-width="2" stroke-linecap="round"/>
+      </g>
+      <text x="66" y="31" fill="#f2f2f2" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="17" font-weight="700">Pub/Sub</text>
+      <text x="66" y="52" fill="#9a9a9a" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5">event topics</text>
+    </g>
+  </g>
+</svg>
