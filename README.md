@@ -164,7 +164,7 @@ A type belongs to a package when the package is its exact prefix and the next id
 
 For Spanner, `protog` then compares the descriptor stored in the database with the one in your fds for each `UPDATE`. Identical descriptors drop the type to `IGNORE`. If either side is missing a descriptor, the command fails rather than guess.
 
-Deploys poll the Spanner operation every three seconds and surface its progress percentage and throttling flag. Pub/Sub deploys stop scheduling new batches after the first failed topic and report the outcome of each topic individually.
+Deploys poll the Spanner operation every three seconds and surface its progress percentage and throttling flag. Several deploys may share one database and run at the same time, each having read the bundle before the others' DDL landed, so all of them plan an `INSERT` for a shared imported type such as `google.type.DayOfWeek` and Spanner rejects every one but the first with `Type already exists`. A Spanner deploy treats that rejection (and its `NotFound` mirror for a type removed meanwhile) as a stale snapshot: it re-reads the bundle, re-plans, prints the revised plan and submits again, up to three times, before reporting the failure. Pub/Sub deploys stop scheduling new batches after the first failed topic and report the outcome of each topic individually.
 
 ## Machine-Readable Output
 
