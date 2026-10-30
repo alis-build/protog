@@ -222,18 +222,18 @@ func NewPlan(cmd *cobra.Command, args []string) (*Plan, error) {
 	if err != nil {
 		return nil, fmt.Errorf("viewing proto bundles: %w", err)
 	}
-	plan := &Plan{
-		Client:   client,
-		Database: database,
-		FdsBytes: fdsBytes,
-	}
-	plan.ExistingTypes = len(bundles.Types)
 	var packageIDs []string
 	if len(args) > 2 {
 		packageIDs = args[2:]
 	}
-	plan.Diff = diff.New(bundles.Types, fdsTypes, packageIDs)
-	if err := removeUnchangedUpdates(plan.Diff, bundles.Descriptors, fdsBytes); err != nil {
+	plan := &Plan{
+		Client:     client,
+		Database:   database,
+		FdsBytes:   fdsBytes,
+		desired:    fdsTypes,
+		packageIDs: packageIDs,
+	}
+	if err := plan.replan(bundles); err != nil {
 		plan.Close()
 		return nil, err
 	}
@@ -250,6 +250,65 @@ type Plan struct {
 	// in the requested packages is removed and no descriptors are uploaded.
 	Destroy bool
 	*diff.Diff
+	// desired and packageIDs are the inputs the Diff was computed from, kept
+	// so the plan can be recomputed against a fresh bundle snapshot when the
+	// database changed between the read and the DDL (see Deploy).
+	desired    map[string]struct{}
+	packageIDs []string
+	// snapshot and apply are the live Spanner calls, replaced in tests.
+	snapshot func(ctx context.Context) (*bundleSnapshot, error)
+	apply    func(ctx context.Context, statement string, start time.Time) (*LroInfo, error)
+}
+
+// replan recomputes the Diff against a bundle snapshot.
+func (p *Plan) replan(bundles *bundleSnapshot) error {
+	p.ExistingTypes = len(bundles.Types)
+	p.Diff = diff.New(bundles.Types, p.desired, p.packageIDs)
+	if p.Destroy {
+		return nil
+	}
+	return removeUnchangedUpdates(p.Diff, bundles.Descriptors, p.FdsBytes)
+}
+
+// Refresh re-reads the database's proto bundle and recomputes the plan
+// against it.
+func (p *Plan) Refresh(ctx context.Context) error {
+	snapshot := p.snapshot
+	if snapshot == nil {
+		snapshot = func(ctx context.Context) (*bundleSnapshot, error) {
+			return retryUnauthenticated(
+				func() (*bundleSnapshot, error) {
+					return viewProtobundles(ctx, p.Client, p.Database)
+				},
+				func() error {
+					return refreshSpannerAdmin(ctx, &p.Client)
+				},
+			)
+		}
+	}
+	bundles, err := snapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("viewing proto bundles: %w", err)
+	}
+	return p.replan(bundles)
+}
+
+// maxReplans bounds how many times Deploy re-reads the bundle and retries
+// after Spanner rejected the DDL because the bundle changed under the plan.
+const maxReplans = 3
+
+// staleBundle reports whether Spanner rejected the DDL because the bundle's
+// membership differs from the snapshot the plan was computed from: a type the
+// plan inserts already exists, or one it updates or deletes is gone. That
+// happens when several deploys share a database and run at the same time —
+// each reads the bundle before the others' DDL lands, so all of them plan an
+// INSERT for a shared imported type and only the first succeeds.
+func staleBundle(err error) bool {
+	switch status.Code(err) {
+	case codes.AlreadyExists, codes.NotFound:
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "type already exists")
 }
 
 func (p *Plan) Close() {
@@ -285,21 +344,60 @@ func (p *Plan) action() output.Action {
 // Deploy submits the proto bundle DDL and waits for the long-running
 // operation, emitting progress from its metadata. The returned LroInfo is nil
 // only when the DDL submission itself failed.
+//
+// When Spanner rejects the DDL because the bundle changed since it was read
+// (see staleBundle), the bundle is re-read, the plan recomputed and the DDL
+// submitted again, up to maxReplans times. A type another deploy inserted in
+// the meantime then plans as an update or no-op instead of a second insert.
 func (p *Plan) Deploy(ctx context.Context) (*LroInfo, error) {
 	target := output.SpannerDatabase(p.Database)
-	statement := p.Statement()
-	start := time.Now()
-	if statement == "" {
-		output.ApplyStart(p.action(), target, "No changes")
-		output.ApplyComplete(p.action(), target, "No changes", time.Since(start))
-		return &LroInfo{
-			Name:             "operations/none",
-			Done:             true,
-			Throttled:        false,
-			CommitTimestamps: []string{},
-		}, nil
+	for replans := 0; ; replans++ {
+		statement := p.Statement()
+		start := time.Now()
+		if statement == "" {
+			output.ApplyStart(p.action(), target, "No changes")
+			output.ApplyComplete(p.action(), target, "No changes", time.Since(start))
+			return &LroInfo{
+				Name:             "operations/none",
+				Done:             true,
+				Throttled:        false,
+				CommitTimestamps: []string{},
+			}, nil
+		}
+		output.ApplyStart(p.action(), target, statement)
+		apply := p.apply
+		if apply == nil {
+			apply = p.applyDdl
+		}
+		info, err := apply(ctx, statement, start)
+		if err == nil {
+			output.ApplyComplete(p.action(), target, info.Name, time.Since(start))
+			return info, nil
+		}
+		if replans >= maxReplans || !staleBundle(err) {
+			if info != nil {
+				output.ApplyErrored(p.action(), target, err, time.Since(start))
+			}
+			return info, err
+		}
+		output.Diagnostic("warning", "proto bundle changed since it was read; re-planning",
+			fmt.Sprintf("%s (attempt %d of %d)", status.Convert(err).Message(), replans+1, maxReplans))
+		if refreshErr := p.Refresh(ctx); refreshErr != nil {
+			if info != nil {
+				output.ApplyErrored(p.action(), target, err, time.Since(start))
+			}
+			return info, fmt.Errorf("re-planning after %v: %w", err, refreshErr)
+		}
+		p.Emit(output.Get(), output.SpannerType(p.Database), "deploy", &diff.PrintOptions{NoUpdates: p.Destroy})
 	}
-	output.ApplyStart(p.action(), target, statement)
+}
+
+// applyDdl submits one DDL statement and waits for its long-running
+// operation. The returned LroInfo is nil when the submission itself failed;
+// errors carry the gRPC status of the rejected DDL so callers can classify
+// them.
+func (p *Plan) applyDdl(ctx context.Context, statement string, start time.Time) (*LroInfo, error) {
+	target := output.SpannerDatabase(p.Database)
 	request := &spannerPb.UpdateDatabaseDdlRequest{
 		Database:         p.Database,
 		Statements:       []string{statement},
@@ -332,11 +430,9 @@ func (p *Plan) Deploy(ctx context.Context) (*LroInfo, error) {
 		},
 	)
 	if err != nil {
-		output.ApplyErrored(p.action(), target, err, time.Since(start))
 		return info, fmt.Errorf("waiting for Spanner Database DDL update to complete: %w", err)
 	}
 	info.Done = true
-	output.ApplyComplete(p.action(), target, operationName, time.Since(start))
 	return info, nil
 }
 
@@ -458,12 +554,15 @@ func NewDestroyPlan(cmd *cobra.Command, args []string) (*Plan, error) {
 		return nil, fmt.Errorf("viewing proto bundles: %w", err)
 	}
 	plan := &Plan{
-		Client:        client,
-		Database:      database,
-		ExistingTypes: len(bundles.Types),
-		Destroy:       true,
+		Client:     client,
+		Database:   database,
+		Destroy:    true,
+		packageIDs: args[1:],
 	}
-	plan.Diff = diff.New(bundles.Types, nil, args[1:])
+	if err := plan.replan(bundles); err != nil {
+		plan.Close()
+		return nil, err
+	}
 	return plan, nil
 }
 
